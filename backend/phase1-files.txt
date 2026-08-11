@@ -1,0 +1,663 @@
+===== app/repositories/people.py =====
+import uuid
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.enums import ProfileStatus
+from app.models.person import Person
+
+
+class PersonRepository:
+    def __init__(self, session: AsyncSession, organization_id: uuid.UUID) -> None:
+        self.session = session
+        self.organization_id = organization_id
+
+    async def list(self, *, limit: int, offset: int) -> tuple[list[Person], int]:
+        tenant_filter = (
+            Person.organization_id == self.organization_id,
+            Person.profile_status != ProfileStatus.ARCHIVED,
+        )
+        rows = await self.session.scalars(
+            select(Person).where(*tenant_filter).order_by(Person.display_name).limit(limit).offset(offset)
+        )
+        total = await self.session.scalar(select(func.count(Person.id)).where(*tenant_filter))
+        return list(rows), total or 0
+
+    async def get(self, person_id: uuid.UUID, *, include_archived: bool = False) -> Person | None:
+        query = select(Person).where(
+            Person.id == person_id,
+            Person.organization_id == self.organization_id,
+        )
+        if not include_archived:
+            query = query.where(Person.profile_status != ProfileStatus.ARCHIVED)
+        return await self.session.scalar(query)
+
+    def add(self, person: Person) -> None:
+        if person.organization_id != self.organization_id:
+            raise ValueError("Person organization does not match repository context")
+        self.session.add(person)
+
+===== app/api/dependencies.py =====
+import uuid
+from typing import Annotated
+
+import jwt
+from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
+
+from app.db.session import get_db
+from app.models.enums import OrganizationStatus
+from app.models.membership import OrganizationMembership
+from app.models.user import User
+from app.security.jwt import decode_access_token
+
+bearer_scheme = HTTPBearer(auto_error=False)
+SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+async def get_current_user(
+    session: SessionDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> User:
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing authentication credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None:
+        raise unauthorized
+    try:
+        user_id = decode_access_token(credentials.credentials)
+    except (jwt.InvalidTokenError, ValueError):
+        raise unauthorized from None
+    user = await session.get(User, user_id)
+    if user is None or not user.is_active:
+        raise unauthorized
+    return user
+
+
+CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+async def get_active_membership(
+    session: SessionDep,
+    user: CurrentUser,
+    organization_id: Annotated[uuid.UUID | None, Header(alias="X-Organization-ID")] = None,
+) -> OrganizationMembership:
+    query = (
+        select(OrganizationMembership)
+        .options(joinedload(OrganizationMembership.organization))
+        .where(OrganizationMembership.user_id == user.id, OrganizationMembership.is_active.is_(True))
+    )
+    if organization_id is not None:
+        query = query.where(OrganizationMembership.organization_id == organization_id)
+    memberships = list((await session.scalars(query)).unique())
+    if not memberships:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No active membership for organization")
+    if organization_id is None and len(memberships) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-Organization-ID is required when the user belongs to multiple organizations",
+        )
+    membership = memberships[0]
+    if membership.organization.status != OrganizationStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization is not active")
+    return membership
+
+
+ActiveMembership = Annotated[OrganizationMembership, Depends(get_active_membership)]
+===== app/api/v1/auth.py =====
+from fastapi import APIRouter, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
+
+from app.api.dependencies import CurrentUser, SessionDep
+from app.models.enums import MembershipRole
+from app.models.membership import OrganizationMembership
+from app.models.organization import Organization
+from app.models.user import User
+from app.schemas.auth import (
+    CurrentUserResponse,
+    LoginRequest,
+    MembershipSummary,
+    RegisterOrganizationRequest,
+    RegistrationResponse,
+    TokenResponse,
+)
+from app.security.jwt import create_access_token
+from app.security.passwords import hash_password, verify_password
+
+router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+@router.post(
+    "/register-organization", response_model=RegistrationResponse, status_code=status.HTTP_201_CREATED
+)
+async def register_organization(
+    data: RegisterOrganizationRequest, session: SessionDep
+) -> RegistrationResponse:
+    organization = Organization(name=data.organization_name.strip(), slug=data.organization_slug)
+    user = User(
+        email=str(data.email).lower(),
+        full_name=data.full_name.strip(),
+        password_hash=hash_password(data.password),
+    )
+    try:
+        async with session.begin():
+            session.add_all([organization, user])
+            await session.flush()
+            session.add(
+                OrganizationMembership(
+                    organization_id=organization.id,
+                    user_id=user.id,
+                    role=MembershipRole.OWNER,
+                )
+            )
+    except IntegrityError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Organization slug or user email is already registered",
+        ) from None
+    return RegistrationResponse(
+        organization_id=organization.id,
+        user_id=user.id,
+        access_token=create_access_token(user.id),
+    )
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(data: LoginRequest, session: SessionDep) -> TokenResponse:
+    user = await session.scalar(select(User).where(User.email == str(data.email).lower()))
+    if user is None or not user.is_active or not verify_password(data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return TokenResponse(access_token=create_access_token(user.id))
+
+
+@router.get("/me", response_model=CurrentUserResponse)
+async def me(user: CurrentUser, session: SessionDep) -> CurrentUserResponse:
+    memberships = list(
+        (
+            await session.scalars(
+                select(OrganizationMembership)
+                .options(joinedload(OrganizationMembership.organization))
+                .where(
+                    OrganizationMembership.user_id == user.id,
+                    OrganizationMembership.is_active.is_(True),
+                )
+            )
+        ).unique()
+    )
+    return CurrentUserResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        memberships=[
+            MembershipSummary(
+                organization_id=item.organization_id,
+                organization_name=item.organization.name,
+                organization_slug=item.organization.slug,
+                role=item.role,
+            )
+            for item in memberships
+        ],
+    )
+
+===== app/api/v1/people.py =====
+import uuid
+
+from fastapi import APIRouter, HTTPException, Query, Response, status
+
+from app.api.dependencies import ActiveMembership, CurrentUser, SessionDep
+from app.models.enums import MembershipRole
+from app.models.person import Person
+from app.repositories.people import PersonRepository
+from app.schemas.person import PeoplePage, PersonCreate, PersonResponse, PersonUpdate
+from app.services.people import PersonService
+
+router = APIRouter(prefix="/people", tags=["people"])
+WRITE_ROLES = {
+    MembershipRole.OWNER,
+    MembershipRole.ADMIN,
+    MembershipRole.MANAGER,
+    MembershipRole.DATA_ENTRY,
+}
+
+
+def require_write_access(membership: ActiveMembership) -> None:
+    if membership.role not in WRITE_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Write access is required")
+
+
+@router.get("", response_model=PeoplePage)
+async def list_people(
+    membership: ActiveMembership,
+    session: SessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> PeoplePage:
+    items, total = await PersonRepository(session, membership.organization_id).list(
+        limit=limit, offset=offset
+    )
+    return PeoplePage(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.post("", response_model=PersonResponse, status_code=status.HTTP_201_CREATED)
+async def create_person(
+    data: PersonCreate,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Person:
+    require_write_access(membership)
+    return await PersonService(session, membership.organization_id, user.id).create(data)
+
+
+@router.get("/{person_id}", response_model=PersonResponse)
+async def get_person(
+    person_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Person:
+    return await PersonService(session, membership.organization_id, user.id).get_or_404(person_id)
+
+
+@router.patch("/{person_id}", response_model=PersonResponse)
+async def update_person(
+    person_id: uuid.UUID,
+    data: PersonUpdate,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Person:
+    require_write_access(membership)
+    return await PersonService(session, membership.organization_id, user.id).update(person_id, data)
+
+
+@router.delete("/{person_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def archive_person(
+    person_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Response:
+    require_write_access(membership)
+    await PersonService(session, membership.organization_id, user.id).archive(person_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+===== app/models/organization.py =====
+from typing import TYPE_CHECKING
+
+from sqlalchemy import Enum, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.enums import OrganizationStatus
+
+if TYPE_CHECKING:
+    from app.models.membership import OrganizationMembership
+
+
+class Organization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "organizations"
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    status: Mapped[OrganizationStatus] = mapped_column(
+        Enum(OrganizationStatus, native_enum=False), default=OrganizationStatus.ACTIVE, nullable=False
+    )
+    memberships: Mapped[list["OrganizationMembership"]] = relationship(back_populates="organization")
+===== app/models/person.py =====
+import uuid
+
+from sqlalchemy import Enum, ForeignKey, Index, String, Text, Uuid
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.enums import AvailabilityStatus, ProfileStatus
+
+
+class Person(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "people"
+    __table_args__ = (Index("ix_people_organization_profile", "organization_id", "profile_status"),)
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    middle_name: Mapped[str | None] = mapped_column(String(100))
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(250), nullable=False)
+    professional_title: Mapped[str | None] = mapped_column(String(200))
+    primary_email: Mapped[str | None] = mapped_column(String(320))
+    primary_phone: Mapped[str | None] = mapped_column(String(50))
+    nationality: Mapped[str | None] = mapped_column(String(100))
+    country_of_residence: Mapped[str | None] = mapped_column(String(100))
+    summary: Mapped[str | None] = mapped_column(Text)
+    availability_status: Mapped[AvailabilityStatus] = mapped_column(
+        Enum(AvailabilityStatus, native_enum=False), default=AvailabilityStatus.UNKNOWN, nullable=False
+    )
+    profile_status: Mapped[ProfileStatus] = mapped_column(
+        Enum(ProfileStatus, native_enum=False), default=ProfileStatus.DRAFT, nullable=False
+    )
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    updated_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+
+===== app/schemas/auth.py =====
+import uuid
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from app.models.enums import MembershipRole
+from app.schemas.common import AuditFields, ORMModel
+
+
+class RegisterOrganizationRequest(BaseModel):
+    organization_name: str = Field(min_length=2, max_length=200)
+    organization_slug: str = Field(min_length=2, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    full_name: str = Field(min_length=2, max_length=200)
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.lower()
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class MembershipSummary(ORMModel):
+    organization_id: uuid.UUID
+    organization_name: str
+    organization_slug: str
+    role: MembershipRole
+
+
+class UserResponse(AuditFields):
+    email: EmailStr
+    full_name: str
+    is_active: bool
+
+
+class CurrentUserResponse(UserResponse):
+    memberships: list[MembershipSummary]
+
+
+class RegistrationResponse(BaseModel):
+    organization_id: uuid.UUID
+    user_id: uuid.UUID
+    access_token: str
+    token_type: str = "bearer"
+
+===== app/schemas/person.py =====
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, EmailStr, Field, model_validator
+
+from app.models.enums import AvailabilityStatus, ProfileStatus
+from app.schemas.common import AuditFields
+
+
+class PersonFields(BaseModel):
+    first_name: str = Field(min_length=1, max_length=100)
+    middle_name: str | None = Field(default=None, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+    display_name: str | None = Field(default=None, max_length=250)
+    professional_title: str | None = Field(default=None, max_length=200)
+    primary_email: EmailStr | None = None
+    primary_phone: str | None = Field(default=None, max_length=50)
+    nationality: str | None = Field(default=None, max_length=100)
+    country_of_residence: str | None = Field(default=None, max_length=100)
+    summary: str | None = None
+    availability_status: AvailabilityStatus = AvailabilityStatus.UNKNOWN
+    profile_status: ProfileStatus = ProfileStatus.DRAFT
+
+
+class PersonCreate(PersonFields):
+    pass
+
+
+class PersonUpdate(BaseModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=100)
+    middle_name: str | None = Field(default=None, max_length=100)
+    last_name: str | None = Field(default=None, min_length=1, max_length=100)
+    display_name: str | None = Field(default=None, min_length=1, max_length=250)
+    professional_title: str | None = Field(default=None, max_length=200)
+    primary_email: EmailStr | None = None
+    primary_phone: str | None = Field(default=None, max_length=50)
+    nationality: str | None = Field(default=None, max_length=100)
+    country_of_residence: str | None = Field(default=None, max_length=100)
+    summary: str | None = None
+    availability_status: AvailabilityStatus | None = None
+    profile_status: ProfileStatus | None = None
+
+    @model_validator(mode="after")
+    def reject_empty_patch(self) -> "PersonUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one field must be supplied")
+        return self
+
+
+class PersonResponse(AuditFields, PersonFields):
+    display_name: str
+    organization_id: uuid.UUID
+    created_by_user_id: uuid.UUID
+    updated_by_user_id: uuid.UUID
+
+
+class PeoplePage(BaseModel):
+    items: list[PersonResponse]
+    total: int
+    limit: int
+    offset: int
+
+===== app/services/people.py =====
+import uuid
+
+from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.enums import ProfileStatus
+from app.models.person import Person
+from app.repositories.people import PersonRepository
+from app.schemas.person import PersonCreate, PersonUpdate
+
+
+class PersonService:
+    def __init__(self, session: AsyncSession, organization_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        self.session = session
+        self.organization_id = organization_id
+        self.user_id = user_id
+        self.repository = PersonRepository(session, organization_id)
+
+    async def create(self, data: PersonCreate) -> Person:
+        values = data.model_dump()
+        values["display_name"] = data.display_name or " ".join(
+            part for part in (data.first_name, data.middle_name, data.last_name) if part
+        )
+        person = Person(
+            **values,
+            organization_id=self.organization_id,
+            created_by_user_id=self.user_id,
+            updated_by_user_id=self.user_id,
+        )
+        self.repository.add(person)
+        await self.session.commit()
+        await self.session.refresh(person)
+        return person
+
+    async def get_or_404(self, person_id: uuid.UUID) -> Person:
+        person = await self.repository.get(person_id)
+        if person is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
+        return person
+
+    async def update(self, person_id: uuid.UUID, data: PersonUpdate) -> Person:
+        person = await self.get_or_404(person_id)
+        for field, value in data.model_dump(exclude_unset=True).items():
+            setattr(person, field, value)
+        person.updated_by_user_id = self.user_id
+        await self.session.commit()
+        await self.session.refresh(person)
+        return person
+
+    async def archive(self, person_id: uuid.UUID) -> None:
+        person = await self.get_or_404(person_id)
+        person.profile_status = ProfileStatus.ARCHIVED
+        person.updated_by_user_id = self.user_id
+        await self.session.commit()
+
+===== alembic/env.py =====
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+from app.core.config import get_settings
+from app.db.base import Base
+from app.models import Organization, OrganizationMembership, Person, User  # noqa: F401
+
+config = context.config
+config.set_main_option("sqlalchemy.url", get_settings().database_url)
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+target_metadata = Base.metadata
+
+
+def run_migrations_offline() -> None:
+    context.configure(
+        url=config.get_main_option("sqlalchemy.url"),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}), prefix="sqlalchemy.", poolclass=pool.NullPool
+    )
+    with connectable.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+===== migration =====
+"""Initial organizations, users, memberships, and people schema."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "20260731_0001"
+down_revision: str | None = None
+branch_labels: Sequence[str] | None = None
+depends_on: Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "organizations",
+        sa.Column("name", sa.String(200), nullable=False),
+        sa.Column("slug", sa.String(100), nullable=False),
+        sa.Column("status", sa.String(9), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_organizations")),
+    )
+    op.create_index(op.f("ix_organizations_slug"), "organizations", ["slug"], unique=True)
+    op.create_table(
+        "users",
+        sa.Column("email", sa.String(320), nullable=False),
+        sa.Column("password_hash", sa.String(255), nullable=False),
+        sa.Column("full_name", sa.String(200), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
+    )
+    op.create_index(op.f("ix_users_email"), "users", ["email"], unique=True)
+    op.create_table(
+        "organization_memberships",
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("role", sa.String(10), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE", name=op.f("fk_organization_memberships_organization_id_organizations")),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE", name=op.f("fk_organization_memberships_user_id_users")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_organization_memberships")),
+        sa.UniqueConstraint("organization_id", "user_id", name="uq_membership_organization_user"),
+    )
+    op.create_index(op.f("ix_organization_memberships_organization_id"), "organization_memberships", ["organization_id"])
+    op.create_index(op.f("ix_organization_memberships_user_id"), "organization_memberships", ["user_id"])
+    op.create_table(
+        "people",
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("first_name", sa.String(100), nullable=False),
+        sa.Column("middle_name", sa.String(100)),
+        sa.Column("last_name", sa.String(100), nullable=False),
+        sa.Column("display_name", sa.String(250), nullable=False),
+        sa.Column("professional_title", sa.String(200)),
+        sa.Column("primary_email", sa.String(320)),
+        sa.Column("primary_phone", sa.String(50)),
+        sa.Column("nationality", sa.String(100)),
+        sa.Column("country_of_residence", sa.String(100)),
+        sa.Column("summary", sa.Text()),
+        sa.Column("availability_status", sa.String(19), nullable=False),
+        sa.Column("profile_status", sa.String(8), nullable=False),
+        sa.Column("created_by_user_id", sa.Uuid(), nullable=False),
+        sa.Column("updated_by_user_id", sa.Uuid(), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], name=op.f("fk_people_created_by_user_id_users")),
+        sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE", name=op.f("fk_people_organization_id_organizations")),
+        sa.ForeignKeyConstraint(["updated_by_user_id"], ["users.id"], name=op.f("fk_people_updated_by_user_id_users")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_people")),
+    )
+    op.create_index(op.f("ix_people_organization_id"), "people", ["organization_id"])
+    op.create_index("ix_people_organization_profile", "people", ["organization_id", "profile_status"])
+
+
+def downgrade() -> None:
+    op.drop_table("people")
+    op.drop_table("organization_memberships")
+    op.drop_table("users")
+    op.drop_table("organizations")
+
