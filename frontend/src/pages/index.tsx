@@ -12,6 +12,12 @@ import {
   Briefcase,
   Building2,
   FolderKanban,
+  FileText,
+  Download,
+  Sparkles,
+  Check,
+  XCircle,
+  Upload,
   GraduationCap,
   Plus,
   Search,
@@ -25,6 +31,7 @@ import {
   Link,
   useNavigate,
   useParams,
+  useSearchParams,
 } from "react-router-dom";
 import { z } from "zod";
 
@@ -34,7 +41,7 @@ import {
   PageHeader,
   TextArea,
 } from "../components/ui";
-import { API_URL, api } from "../lib/api";
+import { API_URL, api, apiDownload } from "../lib/api";
 import { session } from "../lib/session";
 import type {
   CurrentUser,
@@ -45,6 +52,10 @@ import type {
   PersonCertification,
   PersonEducation,
   PersonSkill,
+  PersonDocument,
+  DocumentType,
+  ProfileSuggestion,
+  ProfileCompleteness,
   ProjectExperience,
 } from "../types";
 
@@ -652,9 +663,6 @@ const personSchema =
     country_of_residence:
       z.string().optional(),
 
-    summary:
-      z.string().optional(),
-
     availability_status:
       z.enum([
         "unknown",
@@ -743,7 +751,7 @@ export function AddPersonPage() {
         );
 
         navigate(
-          `/people/${person.id}`,
+          `/people/${person.id}?tab=documents`,
         );
       },
     });
@@ -764,15 +772,7 @@ export function AddPersonPage() {
         eyebrow="New resource record"
         title="Add a person"
       >
-        Capture the person's
-        core profile. Skills,
-        education,
-        certifications,
-        work experience,
-        projects, and
-        capability records can be
-        added immediately
-        after saving.
+        Enter only the essentials. After saving, upload the person's CV, certificates, degrees, and supporting evidence so AI can propose the rest of the profile for review.
       </PageHeader>
 
       <form
@@ -876,15 +876,6 @@ export function AddPersonPage() {
             </select>
           </label>
 
-          <div className="sm:col-span-2">
-            <TextArea
-              label="Professional summary"
-              rows={5}
-              {...register(
-                "summary",
-              )}
-            />
-          </div>
         </div>
 
         {mutation.error && (
@@ -931,7 +922,8 @@ type CapabilityTab =
   | "education"
   | "certifications"
   | "work"
-  | "projects";
+  | "projects"
+  | "documents";
 
 function EmptyCapability({
   icon: Icon,
@@ -3080,14 +3072,236 @@ function ProjectsPanel({
   );
 }
 
+
+const documentTypeOptions: { value: DocumentType; label: string }[] = [
+  { value: "cv", label: "CV / Resume" },
+  { value: "certificate", label: "Professional certificate" },
+  { value: "degree", label: "Degree / academic evidence" },
+  { value: "good_completion_certificate", label: "Good completion certificate" },
+  { value: "reference_letter", label: "Reference letter" },
+  { value: "license", label: "License / accreditation" },
+  { value: "project_evidence", label: "Project evidence" },
+  { value: "employment_evidence", label: "Employment evidence" },
+  { value: "other", label: "Other" },
+];
+
+function DocumentsPanel({ personId }: { personId: string }) {
+  const queryClient = useQueryClient();
+  const [file, setFile] = React.useState<File | null>(null);
+  const [documentType, setDocumentType] = React.useState<DocumentType>("cv");
+  const [title, setTitle] = React.useState("");
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [editing, setEditing] = React.useState<Record<string, string> | null>(null);
+
+  const documents = useQuery({
+    queryKey: ["documents", personId],
+    queryFn: () => api<PersonDocument[]>(`/people/${personId}/documents`),
+  });
+  const suggestions = useQuery({
+    queryKey: ["profile-suggestions", personId],
+    queryFn: () => api<ProfileSuggestion[]>(`/people/${personId}/ai-suggestions?status=pending`),
+  });
+  const completeness = useQuery({
+    queryKey: ["profile-completeness", personId],
+    queryFn: () => api<ProfileCompleteness>(`/people/${personId}/completeness`),
+  });
+
+  const refreshProfile = () => {
+    for (const key of ["documents", "profile-suggestions", "profile-completeness", "person", "skills", "education", "certifications", "employment", "projects"]) {
+      queryClient.invalidateQueries({ queryKey: [key, personId] });
+    }
+  };
+
+  const uploadMutation = useMutation({
+    mutationFn: async () => {
+      if (!file) throw new Error("Choose a document first.");
+      setUploadError(null);
+      const form = new FormData();
+      form.append("file", file);
+      form.append("document_type", documentType);
+      if (title.trim()) form.append("title", title.trim());
+      return api<PersonDocument>(`/people/${personId}/documents`, { method: "POST", body: form });
+    },
+    onSuccess: () => {
+      setFile(null);
+      setTitle("");
+      refreshProfile();
+    },
+    onError: (error) => setUploadError(error instanceof Error ? error.message : "Upload failed."),
+  });
+
+  const analyze = useMutation({
+    mutationFn: (documentId: string) =>
+      api(`/people/${personId}/documents/${documentId}/analyze`, { method: "POST" }),
+    onSuccess: refreshProfile,
+  });
+
+  const accept = useMutation({
+    mutationFn: (suggestionId: string) =>
+      api(`/people/${personId}/ai-suggestions/${suggestionId}/accept`, { method: "POST" }),
+    onSuccess: refreshProfile,
+  });
+
+  const reject = useMutation({
+    mutationFn: (suggestionId: string) =>
+      api(`/people/${personId}/ai-suggestions/${suggestionId}/reject`, { method: "POST" }),
+    onSuccess: refreshProfile,
+  });
+
+  const saveEdit = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: Record<string, unknown> }) =>
+      api(`/people/${personId}/ai-suggestions/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ payload }),
+      }),
+    onSuccess: () => {
+      setEditing(null);
+      queryClient.invalidateQueries({ queryKey: ["profile-suggestions", personId] });
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: (documentId: string) =>
+      api<void>(`/people/${personId}/documents/${documentId}`, { method: "DELETE" }),
+    onSuccess: refreshProfile,
+  });
+
+  const pendingCount = suggestions.data?.length ?? 0;
+
+  return (
+    <div className="grid gap-6">
+      <section className="grid gap-4 rounded-2xl bg-evergreen p-6 text-white md:grid-cols-2">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[.18em] text-mint">Profile readiness</p>
+          <p className="mt-2 font-serif text-3xl">{completeness.data?.profile_percent ?? 0}% complete</p>
+          <p className="mt-2 text-sm text-white/65">AI helps populate the profile, but a teammate must approve every extracted fact.</p>
+        </div>
+        <div className="rounded-xl bg-white/10 p-4">
+          <p className="text-sm text-white/60">Evidence-backed structured records</p>
+          <p className="mt-1 text-2xl font-semibold">{completeness.data?.evidence_percent ?? 0}%</p>
+          <p className="mt-3 text-xs text-white/50">{pendingCount} AI suggestion{pendingCount === 1 ? "" : "s"} awaiting review</p>
+        </div>
+      </section>
+
+      <section className="rounded-2xl bg-white p-7 shadow-soft">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-serif text-2xl">Upload evidence</h2>
+            <p className="mt-1 text-sm text-slate-500">Upload CVs, degrees, certificates, reference letters and project evidence. PDF and DOCX are best for AI extraction.</p>
+          </div>
+          <Upload className="text-evergreen" size={24} />
+        </div>
+        <div className="mt-6 grid gap-4 md:grid-cols-2">
+          <label className="text-sm font-medium text-slate-700 md:col-span-2">
+            Document
+            <input
+              type="file"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.jpg,.jpeg,.png,.txt,.rtf,.odt,.ods,.odp"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm"
+            />
+          </label>
+          <label className="text-sm font-medium text-slate-700">
+            Type
+            <select value={documentType} onChange={(event) => setDocumentType(event.target.value as DocumentType)} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3">
+              {documentTypeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </label>
+          <Field label="Title (optional)" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Defaults to the filename" />
+        </div>
+        {(uploadError || uploadMutation.error) && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{uploadError ?? uploadMutation.error?.message}</p>}
+        <div className="mt-5">
+          <Button type="button" disabled={!file || uploadMutation.isPending} onClick={() => uploadMutation.mutate()}>
+            {uploadMutation.isPending ? "Uploading…" : "Upload document"}
+          </Button>
+        </div>
+      </section>
+
+      <section className="rounded-2xl bg-white p-7 shadow-soft">
+        <h2 className="font-serif text-2xl">Documents</h2>
+        <div className="mt-5 grid gap-3">
+          {documents.isLoading ? <p className="text-sm text-slate-500">Loading documents…</p> : documents.data?.length ? documents.data.map((document) => (
+            <article key={document.id} className="rounded-xl border border-slate-200 p-4">
+              <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+                <div className="flex min-w-0 items-start gap-3">
+                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sand"><FileText size={18} /></div>
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold">{document.title}</p>
+                    <p className="mt-1 text-xs text-slate-400">{document.original_filename} · {(document.file_size / 1024).toFixed(0)} KB</p>
+                    <p className="mt-1 text-xs capitalize text-slate-500">AI: {document.analysis_status.replaceAll("_", " ")}</p>
+                    {document.analysis_error && <p className="mt-2 text-xs text-red-600">{document.analysis_error}</p>}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" secondary onClick={() => apiDownload(`/people/${personId}/documents/${document.id}/download`, document.original_filename)}><Download size={15} className="mr-2 inline" />Download</Button>
+                  <Button type="button" disabled={analyze.isPending} onClick={() => analyze.mutate(document.id)}><Sparkles size={15} className="mr-2 inline" />{document.analysis_status === "not_analyzed" ? "Analyze" : "Analyze again"}</Button>
+                  <button type="button" className="rounded-xl p-3 text-slate-400 hover:bg-red-50 hover:text-red-600" onClick={() => window.confirm(`Delete ${document.title}?`) && remove.mutate(document.id)}><Trash2 size={16} /></button>
+                </div>
+              </div>
+            </article>
+          )) : <EmptyCapability icon={FileText} title="No documents uploaded" text="Upload the person's CV and evidence. AI can then propose profile records for human review." />}
+        </div>
+        {analyze.error && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{analyze.error.message}</p>}
+      </section>
+
+      <section className="rounded-2xl bg-white p-7 shadow-soft">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="font-serif text-2xl">AI suggestions</h2>
+            <p className="mt-1 text-sm text-slate-500">Nothing is written into the profile until a reviewer accepts it.</p>
+          </div>
+          <span className="rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">{pendingCount} pending</span>
+        </div>
+        <div className="mt-5 grid gap-4">
+          {suggestions.data?.length ? suggestions.data.map((suggestion) => {
+            const isEditing = editing?.id === suggestion.id;
+            const payloadText = isEditing ? editing.payload : JSON.stringify(suggestion.payload, null, 2);
+            return (
+              <article key={suggestion.id} className="rounded-xl border border-slate-200 p-5">
+                <div className="flex flex-col justify-between gap-4 sm:flex-row">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wider text-evergreen">{suggestion.category}</p>
+                    <h3 className="mt-1 font-semibold">{suggestion.title}</h3>
+                    {suggestion.confidence !== null && <p className="mt-1 text-xs text-slate-400">AI confidence {Math.round(suggestion.confidence * 100)}%</p>}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="button" secondary onClick={() => setEditing(isEditing ? null : { id: suggestion.id, payload: JSON.stringify(suggestion.payload, null, 2) })}>{isEditing ? "Cancel edit" : "Edit"}</Button>
+                    <Button type="button" onClick={() => accept.mutate(suggestion.id)}><Check size={15} className="mr-2 inline" />Accept</Button>
+                    <button type="button" aria-label="Reject suggestion" onClick={() => reject.mutate(suggestion.id)} className="rounded-xl bg-red-50 px-3 text-red-700"><XCircle size={17} /></button>
+                  </div>
+                </div>
+                {isEditing ? (
+                  <div className="mt-4">
+                    <textarea value={payloadText} onChange={(event) => setEditing({ id: suggestion.id, payload: event.target.value })} rows={10} className="w-full rounded-xl border border-slate-200 p-3 font-mono text-xs" />
+                    <div className="mt-3"><Button type="button" disabled={saveEdit.isPending} onClick={() => {
+                      try { saveEdit.mutate({ id: suggestion.id, payload: JSON.parse(payloadText) as Record<string, unknown> }); }
+                      catch { window.alert("The edited suggestion must be valid JSON."); }
+                    }}>Save edit</Button></div>
+                  </div>
+                ) : (
+                  <pre className="mt-4 max-h-64 overflow-auto rounded-xl bg-slate-50 p-4 text-xs leading-5 text-slate-600">{JSON.stringify(suggestion.payload, null, 2)}</pre>
+                )}
+              </article>
+            );
+          }) : <EmptyCapability icon={Sparkles} title="No suggestions waiting" text="Analyze an uploaded document. Extracted facts will appear here for review before they enter the person's profile." />}
+        </div>
+        {(accept.error || reject.error || saveEdit.error) && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{accept.error?.message ?? reject.error?.message ?? saveEdit.error?.message}</p>}
+      </section>
+    </div>
+  );
+}
+
 export function PersonPage() {
   const { personId } =
     useParams();
 
-  const [tab, setTab] =
-    React.useState<CapabilityTab>(
-      "overview",
-    );
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab") as CapabilityTab | null;
+  const [tab, setTab] = React.useState<CapabilityTab>(
+    requestedTab && ["overview", "documents", "skills", "education", "certifications", "work", "projects"].includes(requestedTab)
+      ? requestedTab
+      : "overview",
+  );
 
   const query = useQuery({
     queryKey: [
@@ -3146,6 +3360,10 @@ export function PersonPage() {
       {
         id: "overview",
         label: "Overview",
+      },
+      {
+        id: "documents",
+        label: "Documents & AI",
       },
       {
         id: "skills",
@@ -3230,11 +3448,10 @@ export function PersonPage() {
                   item.id
                 }
                 type="button"
-                onClick={() =>
-                  setTab(
-                    item.id,
-                  )
-                }
+                onClick={() => {
+                  setTab(item.id);
+                  setSearchParams(item.id === "overview" ? {} : { tab: item.id });
+                }}
                 className={`whitespace-nowrap border-b-2 px-4 py-4 text-sm font-semibold transition ${tab ===
                   item.id
                   ? "border-mint text-white"
@@ -3321,6 +3538,10 @@ export function PersonPage() {
               </aside>
             </div>
           )}
+
+        {tab === "documents" && (
+          <DocumentsPanel personId={personId} />
+        )}
 
         {tab ===
           "skills" && (

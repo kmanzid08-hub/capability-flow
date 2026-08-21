@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket_name: str | None = None
 
+    ai_provider: Literal["anthropic"] = "anthropic"
+    anthropic_api_key: str | None = None
+    ai_model: str = "claude-sonnet-4-20250514"
+    ai_max_document_chars: int = Field(default=120_000, ge=10_000, le=500_000)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

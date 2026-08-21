@@ -129,6 +129,9 @@ export type PersonDocument = {
   uploaded_by_user_id: string;
   certification_id: string | null;
   education_id: string | null;
+  analysis_status: "not_analyzed" | "processing" | "ready_for_review" | "complete" | "failed";
+  last_analyzed_at: string | null;
+  analysis_error: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -388,4 +391,40 @@ export type CapabilityGap = {
   recommendation: string | null;
   created_at: string;
   updated_at: string;
+};
+
+
+export type ProfileSuggestionCategory =
+  | "profile"
+  | "skill"
+  | "education"
+  | "certification"
+  | "employment"
+  | "project";
+
+export type ProfileSuggestion = {
+  id: string;
+  organization_id: string;
+  person_id: string;
+  source_document_id: string;
+  category: ProfileSuggestionCategory;
+  title: string;
+  payload: Record<string, unknown>;
+  confidence: number | null;
+  status: "pending" | "accepted" | "rejected";
+  review_note: string | null;
+  applied_entity_id: string | null;
+  created_by_user_id: string;
+  reviewed_by_user_id: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProfileCompleteness = {
+  profile_percent: number;
+  evidence_percent: number;
+  sections: Record<string, boolean>;
+  evidence_backed_records: number;
+  total_structured_records: number;
 };

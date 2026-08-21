@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,6 +25,10 @@ class DocumentResponse(AuditFields):
 
     certification_id: uuid.UUID | None
     education_id: uuid.UUID | None
+
+    analysis_status: str
+    last_analyzed_at: datetime | None
+    analysis_error: str | None
 
 
 class DocumentMetadataUpdate(BaseModel):

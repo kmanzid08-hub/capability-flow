@@ -62,3 +62,17 @@ class DocumentType(StrEnum):
     PRESENTATION = "presentation"
     IMAGE = "image"
     OTHER = "other"
+
+
+class DocumentAnalysisStatus(StrEnum):
+    NOT_ANALYZED = "not_analyzed"
+    PROCESSING = "processing"
+    READY_FOR_REVIEW = "ready_for_review"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class SuggestionStatus(StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"

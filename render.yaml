@@ -2,34 +2,42 @@ services:
   - type: web
     name: capability-flow-api
     runtime: python
-    plan: free
+    plan: starter
     region: frankfurt
     rootDir: backend
     buildCommand: pip install .
     startCommand: python -m alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     autoDeployTrigger: commit
+    disk:
+      name: capability-flow-documents
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.9
-
       - key: DATABASE_URL
         sync: false
-
       - key: JWT_SECRET_KEY
         generateValue: true
-
       - key: JWT_ALGORITHM
         value: HS256
-
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "480"
-
       - key: CORS_ORIGINS
         sync: false
-
       - key: STORAGE_BACKEND
         value: local
+      - key: DOCUMENT_STORAGE_PATH
+        value: /var/data/documents
+      - key: DOCUMENT_MAX_FILE_SIZE_MB
+        value: "25"
+      - key: AI_PROVIDER
+        value: anthropic
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AI_MODEL
+        value: claude-sonnet-4-20250514
 
   - type: web
     name: capability-flow-web

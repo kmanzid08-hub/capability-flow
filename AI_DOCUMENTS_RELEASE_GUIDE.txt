@@ -1,0 +1,46 @@
+CAPABILITY FLOW - DOCUMENT FIRST AI PROFILE RELEASE
+
+WHAT CHANGED
+- Add Person now captures essential manual fields only.
+- New persons open directly on Documents & AI.
+- Durable Render disk configuration is included.
+- Documents can be uploaded/downloaded/deleted.
+- Claude analysis creates reviewable suggestions for profile summary, skills, education, certifications, employment and projects.
+- AI never writes profile facts automatically. Reviewers accept/reject/edit suggestions.
+- Accepted structured facts are linked back to their source document through profile_evidence_links.
+- Profile completeness and evidence coverage are displayed.
+- Existing workspace/multi-user/opportunity functionality is preserved.
+
+LOCAL AI CONFIG (backend/.env)
+ANTHROPIC_API_KEY=your_key_here
+AI_PROVIDER=anthropic
+AI_MODEL=claude-sonnet-4-20250514
+STORAGE_BACKEND=local
+DOCUMENT_STORAGE_PATH=storage/documents
+
+RENDER
+The Blueprint changes the API to Starter and adds a 1 GB persistent disk at /var/data.
+When Render asks for payment, complete the upgrade then set:
+ANTHROPIC_API_KEY=<your secret>
+CORS_ORIGINS=["https://YOUR-FRONTEND.onrender.com"]
+VITE_API_URL=https://YOUR-BACKEND.onrender.com/api/v1
+DATABASE_URL=<your existing database connection string>
+
+VALIDATE BACKEND
+cd C:\Users\LENOVO\capability-flow\backend
+.venv\Scripts\activate
+pip install -e .[dev]
+python -m ruff format app tests alembic
+python -m ruff check . --fix
+python -m mypy app
+python -m pytest -v
+python -m alembic upgrade head
+
+VALIDATE FRONTEND
+cd C:\Users\LENOVO\capability-flow\frontend
+npm run lint
+npm run build
+npm run test
+
+IMPORTANT
+Scanned/image-only files are stored, but this release deliberately does not run OCR. For AI extraction, use a text-searchable PDF/DOCX/TXT. Image OCR can be added later without changing the suggestion/evidence architecture.
