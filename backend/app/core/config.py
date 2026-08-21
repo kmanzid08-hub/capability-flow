@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,12 +20,19 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     cors_origins: list[str] = ["http://localhost:5173"]
 
+    storage_backend: Literal["local", "r2"] = "local"
+
     document_storage_path: Path = Path("storage/documents")
     document_max_file_size_mb: int = Field(
         default=25,
         ge=1,
         le=250,
     )
+
+    r2_endpoint_url: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket_name: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

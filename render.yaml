@@ -2,12 +2,11 @@ services:
   - type: web
     name: capability-flow-api
     runtime: python
-    plan: starter
+    plan: free
     region: frankfurt
     rootDir: backend
     buildCommand: pip install .
-    preDeployCommand: python -m alembic upgrade head
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     autoDeployTrigger: commit
     envVars:
@@ -23,10 +22,16 @@ services:
         sync: false
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "480"
-    disk:
-      name: capability-flow-files
-      mountPath: /opt/render/project/src/backend/storage
-      sizeGB: 1
+      - key: STORAGE_BACKEND
+        value: r2
+      - key: R2_ENDPOINT_URL
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
 
   - type: web
     name: capability-flow-web
@@ -45,7 +50,7 @@ services:
 
 databases:
   - name: capability-flow-db
-    plan: basic-256mb
+    plan: free
     region: frankfurt
     databaseName: capability_flow
     user: capability_flow

@@ -10,7 +10,6 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
 
 from app.api.dependencies import (
     ActiveMembership,
@@ -33,7 +32,6 @@ router = APIRouter(
     tags=["documents"],
 )
 
-
 WRITE_ROLES = {
     MembershipRole.OWNER,
     MembershipRole.ADMIN,
@@ -47,9 +45,21 @@ def require_write_access(
 ) -> None:
     if membership.role not in WRITE_ROLES:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=(status.HTTP_403_FORBIDDEN),
             detail="Write access is required",
         )
+
+
+def service(
+    session: SessionDep,
+    membership: ActiveMembership,
+    user: CurrentUser,
+) -> DocumentService:
+    return DocumentService(
+        session,
+        membership.organization_id,
+        user.id,
+    )
 
 
 @router.get(
@@ -62,15 +72,11 @@ async def list_documents(
     user: CurrentUser,
     session: SessionDep,
 ) -> list[PersonDocument]:
-    service = DocumentService(
+    return await service(
         session,
-        membership.organization_id,
-        user.id,
-    )
-
-    return await service.list_documents(
-        person_id,
-    )
+        membership,
+        user,
+    ).list_documents(person_id)
 
 
 @router.post(
@@ -83,14 +89,11 @@ async def upload_document(
     membership: ActiveMembership,
     user: CurrentUser,
     session: SessionDep,
-    file: Annotated[
-        UploadFile,
-        File(),
-    ],
+    file: Annotated[UploadFile, File()],
     document_type: Annotated[
         DocumentType,
         Form(),
-    ],
+    ] = DocumentType.OTHER,
     title: Annotated[
         str | None,
         Form(),
@@ -108,24 +111,20 @@ async def upload_document(
         Form(),
     ] = None,
 ) -> PersonDocument:
-    require_write_access(
-        membership,
-    )
+    require_write_access(membership)
 
-    service = DocumentService(
+    return await service(
         session,
-        membership.organization_id,
-        user.id,
-    )
-
-    return await service.upload_document(
-        person_id=person_id,
-        upload=file,
-        document_type=document_type,
-        title=title,
-        description=description,
-        certification_id=certification_id,
-        education_id=education_id,
+        membership,
+        user,
+    ).upload_document(
+        person_id,
+        file,
+        document_type,
+        title,
+        description,
+        certification_id,
+        education_id,
     )
 
 
@@ -141,17 +140,13 @@ async def update_document(
     user: CurrentUser,
     session: SessionDep,
 ) -> PersonDocument:
-    require_write_access(
-        membership,
-    )
+    require_write_access(membership)
 
-    service = DocumentService(
+    return await service(
         session,
-        membership.organization_id,
-        user.id,
-    )
-
-    return await service.update_document(
+        membership,
+        user,
+    ).update_document(
         person_id,
         document_id,
         data,
@@ -160,7 +155,6 @@ async def update_document(
 
 @router.get(
     "/{document_id}/download",
-    response_class=FileResponse,
 )
 async def download_document(
     person_id: uuid.UUID,
@@ -168,23 +162,36 @@ async def download_document(
     membership: ActiveMembership,
     user: CurrentUser,
     session: SessionDep,
-) -> FileResponse:
-    service = DocumentService(
+) -> Response:
+    download = await service(
         session,
-        membership.organization_id,
-        user.id,
-    )
-
-    download = await service.get_download(
+        membership,
+        user,
+    ).get_download(
         person_id,
         document_id,
     )
 
-    return FileResponse(
-        path=download.path,
-        media_type=(download.document.mime_type),
-        filename=(download.document.original_filename),
-        content_disposition_type="attachment",
+    filename = download.document.original_filename
+    safe_filename = (
+        filename.replace(
+            '"',
+            "",
+        )
+        .replace(
+            "\r",
+            "",
+        )
+        .replace(
+            "\n",
+            "",
+        )
+    )
+
+    return Response(
+        content=download.content,
+        media_type=(download.document.mime_type or "application/octet-stream"),
+        headers={"Content-Disposition": (f'attachment; filename="{safe_filename}"')},
     )
 
 
@@ -199,21 +206,15 @@ async def delete_document(
     user: CurrentUser,
     session: SessionDep,
 ) -> Response:
-    require_write_access(
-        membership,
-    )
+    require_write_access(membership)
 
-    service = DocumentService(
+    await service(
         session,
-        membership.organization_id,
-        user.id,
-    )
-
-    await service.delete_document(
+        membership,
+        user,
+    ).delete_document(
         person_id,
         document_id,
     )
 
-    return Response(
-        status_code=status.HTTP_204_NO_CONTENT,
-    )
+    return Response(status_code=(status.HTTP_204_NO_CONTENT))

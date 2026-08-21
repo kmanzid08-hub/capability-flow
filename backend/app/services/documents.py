@@ -2,7 +2,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import HTTPException, UploadFile, status
+from fastapi import (
+    HTTPException,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -12,20 +16,24 @@ from app.repositories.capabilities import (
     CertificationRepository,
     EducationRepository,
 )
-from app.repositories.documents import DocumentRepository
+from app.repositories.documents import (
+    DocumentRepository,
+)
 from app.repositories.people import PersonRepository
-from app.schemas.document import DocumentMetadataUpdate
+from app.schemas.document import (
+    DocumentMetadataUpdate,
+)
 from app.services.document_storage import (
     DocumentTooLarge,
     InvalidDocumentFile,
-    LocalDocumentStorage,
+    create_document_storage,
 )
 
 
 @dataclass(frozen=True)
 class DocumentDownload:
     document: PersonDocument
-    path: Path
+    content: bytes
 
 
 class DocumentService:
@@ -41,10 +49,7 @@ class DocumentService:
 
         settings = get_settings()
 
-        self.storage = LocalDocumentStorage(
-            root=settings.document_storage_path,
-            max_file_size_bytes=(settings.document_max_file_size_mb * 1024 * 1024),
-        )
+        self.storage = create_document_storage(settings)
 
         self.people = PersonRepository(
             session,
@@ -70,13 +75,11 @@ class DocumentService:
         self,
         person_id: uuid.UUID,
     ) -> None:
-        person = await self.people.get(
-            person_id,
-        )
+        person = await self.people.get(person_id)
 
         if person is None:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
+                status_code=(status.HTTP_404_NOT_FOUND),
                 detail="Person not found",
             )
 
@@ -84,13 +87,9 @@ class DocumentService:
         self,
         person_id: uuid.UUID,
     ) -> list[PersonDocument]:
-        await self.ensure_person(
-            person_id,
-        )
+        await self.ensure_person(person_id)
 
-        return await self.documents.list(
-            person_id,
-        )
+        return await self.documents.list(person_id)
 
     async def upload_document(
         self,
@@ -102,9 +101,7 @@ class DocumentService:
         certification_id: uuid.UUID | None,
         education_id: uuid.UUID | None,
     ) -> PersonDocument:
-        await self.ensure_person(
-            person_id,
-        )
+        await self.ensure_person(person_id)
 
         if certification_id is not None and education_id is not None:
             raise HTTPException(
@@ -120,8 +117,8 @@ class DocumentService:
 
             if certification is None:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Certification not found",
+                    status_code=(status.HTTP_404_NOT_FOUND),
+                    detail=("Certification not found"),
                 )
 
         if education_id is not None:
@@ -132,8 +129,8 @@ class DocumentService:
 
             if education is None:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Education record not found",
+                    status_code=(status.HTTP_404_NOT_FOUND),
+                    detail=("Education record not found"),
                 )
 
         try:
@@ -160,9 +157,7 @@ class DocumentService:
         )
 
         if len(normalized_title) > 250:
-            await self.storage.delete(
-                stored.storage_key,
-            )
+            await self.storage.delete(stored.storage_key)
 
             raise HTTPException(
                 status_code=(status.HTTP_422_UNPROCESSABLE_ENTITY),
@@ -170,7 +165,7 @@ class DocumentService:
             )
 
         document = PersonDocument(
-            organization_id=self.organization_id,
+            organization_id=(self.organization_id),
             person_id=person_id,
             document_type=document_type,
             title=normalized_title,
@@ -187,20 +182,14 @@ class DocumentService:
             education_id=education_id,
         )
 
-        self.documents.add(
-            document,
-        )
+        self.documents.add(document)
 
         try:
             await self.session.commit()
-            await self.session.refresh(
-                document,
-            )
+            await self.session.refresh(document)
         except Exception:
             await self.session.rollback()
-            await self.storage.delete(
-                stored.storage_key,
-            )
+            await self.storage.delete(stored.storage_key)
             raise
 
         return document
@@ -211,9 +200,7 @@ class DocumentService:
         document_id: uuid.UUID,
         data: DocumentMetadataUpdate,
     ) -> PersonDocument:
-        await self.ensure_person(
-            person_id,
-        )
+        await self.ensure_person(person_id)
 
         document = await self.documents.get(
             person_id,
@@ -222,13 +209,11 @@ class DocumentService:
 
         if document is None:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
+                status_code=(status.HTTP_404_NOT_FOUND),
                 detail="Document not found",
             )
 
-        values = data.model_dump(
-            exclude_unset=True,
-        )
+        values = data.model_dump(exclude_unset=True)
 
         if "title" in values and values["title"] is not None:
             values["title"] = values["title"].strip()
@@ -244,9 +229,7 @@ class DocumentService:
             )
 
         await self.session.commit()
-        await self.session.refresh(
-            document,
-        )
+        await self.session.refresh(document)
 
         return document
 
@@ -255,9 +238,7 @@ class DocumentService:
         person_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> DocumentDownload:
-        await self.ensure_person(
-            person_id,
-        )
+        await self.ensure_person(person_id)
 
         document = await self.documents.get(
             person_id,
@@ -266,23 +247,21 @@ class DocumentService:
 
         if document is None:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
+                status_code=(status.HTTP_404_NOT_FOUND),
                 detail="Document not found",
             )
 
-        path = self.storage.path_for(
-            document.storage_key,
-        )
-
-        if not path.is_file():
+        try:
+            content = await self.storage.read(document.storage_key)
+        except FileNotFoundError as exc:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document file not found",
-            )
+                status_code=(status.HTTP_404_NOT_FOUND),
+                detail=("Document file not found"),
+            ) from exc
 
         return DocumentDownload(
             document=document,
-            path=path,
+            content=content,
         )
 
     async def delete_document(
@@ -290,9 +269,7 @@ class DocumentService:
         person_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> None:
-        await self.ensure_person(
-            person_id,
-        )
+        await self.ensure_person(person_id)
 
         document = await self.documents.get(
             person_id,
@@ -301,17 +278,13 @@ class DocumentService:
 
         if document is None:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
+                status_code=(status.HTTP_404_NOT_FOUND),
                 detail="Document not found",
             )
 
         storage_key = document.storage_key
 
-        await self.session.delete(
-            document,
-        )
+        await self.session.delete(document)
         await self.session.commit()
 
-        await self.storage.delete(
-            storage_key,
-        )
+        await self.storage.delete(storage_key)

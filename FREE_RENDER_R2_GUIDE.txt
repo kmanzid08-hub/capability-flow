@@ -1,0 +1,90 @@
+CAPABILITY FLOW - FREE RENDER + CLOUDFLARE R2 PILOT
+
+PURPOSE
+This package removes the paid Render persistent disk and paid Render plans.
+It keeps local development on local filesystem storage and uses Cloudflare R2
+for durable production documents and opportunity-source snapshots.
+
+NO DATABASE MIGRATION IS REQUIRED FOR THIS STORAGE CHANGE.
+
+FILES TO REPLACE
+  backend/app/core/config.py
+  backend/app/services/document_storage.py
+  backend/app/services/documents.py
+  backend/app/api/v1/documents.py
+  backend/app/services/opportunity_source_storage.py
+  backend/app/api/v1/opportunities.py
+  backend/pyproject.toml
+  backend/.env.example
+  render.yaml
+
+LOCAL BEHAVIOR
+STORAGE_BACKEND defaults to local, so your existing local development workflow
+and document tests continue to use storage/documents and
+storage/opportunity_sources.
+
+RENDER BEHAVIOR
+render.yaml sets STORAGE_BACKEND=r2.
+
+Render resources:
+  capability-flow-api: Free Web Service
+  capability-flow-web: Free Static Site
+  capability-flow-db: Free Render Postgres
+
+The free backend cannot use preDeployCommand, so database migrations run in the
+single-instance start command before Uvicorn starts.
+
+CLOUDFLARE R2 SETUP
+1. Cloudflare Dashboard > Storage & databases > R2.
+2. Create a bucket, suggested name:
+     capability-flow-files
+3. R2 > Manage API Tokens.
+4. Create a token with Object Read & Write permission scoped only to that bucket.
+5. Copy:
+     R2 endpoint URL
+     Access Key ID
+     Secret Access Key
+     Bucket name
+
+Never commit those values to Git.
+
+RENDER BACKEND ENVIRONMENT VARIABLES
+  CORS_ORIGINS=["https://YOUR-FRONTEND.onrender.com"]
+  STORAGE_BACKEND=r2
+  R2_ENDPOINT_URL=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+  R2_ACCESS_KEY_ID=<secret>
+  R2_SECRET_ACCESS_KEY=<secret>
+  R2_BUCKET_NAME=capability-flow-files
+
+RENDER FRONTEND ENVIRONMENT VARIABLE
+  VITE_API_URL=https://YOUR-BACKEND.onrender.com/api/v1
+
+CLAUDE
+Do not add ANTHROPIC_API_KEY until you are ready. Nothing in this package
+removes the existing AI code.
+
+LOCAL VALIDATION
+  cd C:\Users\LENOVO\capability-flow\backend
+  .venv\Scripts\activate
+  python -m pip install -e ".[dev]"
+  python -m ruff format app tests alembic
+  python -m ruff check . --fix
+  python -m mypy app
+  python -m pytest -v
+
+  cd C:\Users\LENOVO\capability-flow\frontend
+  npm run lint
+  npm run build
+  npm run test
+
+GIT
+  cd C:\Users\LENOVO\capability-flow
+  git add backend render.yaml
+  git commit -m "Use R2 storage for free Render pilot"
+  git push
+
+IMPORTANT FREE-PLAN LIMITATIONS
+- Render Free Postgres expires after 30 days and has no backups.
+- Free backend services spin down when idle.
+- R2 is durable object storage; uploaded documents do not depend on Render's
+  ephemeral filesystem.

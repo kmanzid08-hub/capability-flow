@@ -1,8 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 
 from app.api.dependencies import ActiveMembership, CurrentUser, SessionDep
 from app.models.enums import MembershipRole
@@ -293,18 +292,34 @@ async def download_source(
     membership: ActiveMembership,
     user: CurrentUser,
     session: SessionDep,
-) -> FileResponse:
+) -> Response:
     svc = service(session, membership, user)
-    source = await svc.source(opportunity_id, source_id)
+    source = await svc.source(
+        opportunity_id,
+        source_id,
+    )
+
     if not source.storage_path:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "This source has no stored snapshot")
-    path = svc.source_storage.resolve(source.storage_path)
-    if not path.exists():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Stored source snapshot is missing")
-    return FileResponse(
-        path,
-        media_type=source.mime_type or "application/octet-stream",
-        filename=source.original_filename or source.stored_filename or "source",
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "This source has no stored snapshot",
+        )
+
+    try:
+        content = await svc.source_storage.read(source.storage_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Stored source snapshot is missing",
+        ) from exc
+
+    filename = source.original_filename or source.stored_filename or "source"
+    safe_filename = filename.replace('"', "").replace("\r", "").replace("\n", "")
+
+    return Response(
+        content=content,
+        media_type=(source.mime_type or "application/octet-stream"),
+        headers={"Content-Disposition": (f'attachment; filename="{safe_filename}"')},
     )
 
 
