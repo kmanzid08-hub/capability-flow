@@ -100,11 +100,11 @@ export function Button({
         <button
             {...props}
             className={`rounded-xl px-5 py-3 text-sm font-semibold transition disabled:opacity-50 ${secondary
-                    ? "border border-slate-200 bg-white hover:bg-slate-50"
-                    : "bg-evergreen text-white hover:bg-[#103d37]"
+                ? "border border-slate-200 bg-white hover:bg-slate-50"
+                : "bg-evergreen text-white hover:bg-[#103d37]"
                 }`}
         >
             {children}
         </button>
     );
-  }
+}

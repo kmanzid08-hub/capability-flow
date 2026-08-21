@@ -26,3 +26,39 @@ class ProfileStatus(StrEnum):
     DRAFT = "draft"
     ACTIVE = "active"
     ARCHIVED = "archived"
+
+
+class SkillProficiency(StrEnum):
+    BEGINNER = "beginner"
+    INTERMEDIATE = "intermediate"
+    ADVANCED = "advanced"
+    EXPERT = "expert"
+
+
+class DegreeLevel(StrEnum):
+    SECONDARY = "secondary"
+    CERTIFICATE = "certificate"
+    DIPLOMA = "diploma"
+    ASSOCIATE = "associate"
+    BACHELOR = "bachelor"
+    MASTER = "master"
+    DOCTORATE = "doctorate"
+    PROFESSIONAL = "professional"
+    OTHER = "other"
+
+
+class DocumentType(StrEnum):
+    CV = "cv"
+    CERTIFICATE = "certificate"
+    DEGREE = "degree"
+    GOOD_COMPLETION_CERTIFICATE = "good_completion_certificate"
+    REFERENCE_LETTER = "reference_letter"
+    LICENSE = "license"
+    PROJECT_EVIDENCE = "project_evidence"
+    EMPLOYMENT_EVIDENCE = "employment_evidence"
+    REPORT = "report"
+    CONTRACT = "contract"
+    SPREADSHEET = "spreadsheet"
+    PRESENTATION = "presentation"
+    IMAGE = "image"
+    OTHER = "other"

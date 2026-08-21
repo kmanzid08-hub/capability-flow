@@ -1,0 +1,79 @@
+CAPABILITY FLOW - TEAM PILOT ON RENDER
+
+This package does NOT modify the Claude/AI analysis implementation.
+
+WHAT THIS RELEASE ADDS
+- Owner/Admin team account creation inside the SAME organization.
+- Team member listing, roles, activation/deactivation.
+- Protection against removing the final active workspace owner.
+- Render Blueprint for:
+  * FastAPI backend
+  * Vite/React static frontend
+  * Render PostgreSQL
+  * persistent backend disk for uploaded files
+- Render Postgres URL normalization for psycopg.
+
+APPLY FILES
+Extract this ZIP over:
+  C:\Users\LENOVO\capability-flow
+
+Then validate locally.
+
+BACKEND
+  cd C:\Users\LENOVO\capability-flow\backend
+  .venv\Scripts\activate
+  python -m ruff format app tests alembic
+  python -m ruff check .
+  python -m ruff format --check .
+  python -m mypy app
+  python -m pytest -v
+
+FRONTEND
+  cd C:\Users\LENOVO\capability-flow\frontend
+  npm run lint
+  npm run build
+  npm run test
+
+GIT
+From C:\Users\LENOVO\capability-flow:
+  git status
+  git add .
+  git commit -m "Prepare Capability Flow team pilot for Render"
+  git push
+
+RENDER
+1. In Render, New > Blueprint.
+2. Connect the GitHub repository containing render.yaml.
+3. Render will create:
+   - capability-flow-api
+   - capability-flow-web
+   - capability-flow-db
+4. During Blueprint creation / after first resources exist, set:
+   Backend CORS_ORIGINS:
+     ["https://<your-capability-flow-web>.onrender.com"]
+
+   Frontend VITE_API_URL:
+     https://<your-capability-flow-api>.onrender.com/api/v1
+
+5. Redeploy both services after setting those values.
+
+DOCUMENT STORAGE
+The Blueprint mounts a persistent disk at:
+  /opt/render/project/src/backend/storage
+
+Only content written under that directory survives backend restarts/redeploys.
+The backend is intentionally configured as a single instance because Render
+does not support scaling a service that has a persistent disk.
+
+TEAM WORKFLOW
+1. Sign in as the workspace owner.
+2. Open Organization.
+3. Under Workspace members, create one account per teammate.
+4. For staff entering profiles, use role: Data entry.
+5. Give each teammate their own email + temporary password.
+6. They sign in at the Render frontend URL.
+7. Everyone works inside the same organization and the same Postgres database.
+
+AI
+Leave the Claude integration unchanged.
+Do not add ANTHROPIC_API_KEY until you are ready.

@@ -1,0 +1,12 @@
+# Render backend service
+# DATABASE_URL is injected automatically by render.yaml.
+# JWT_SECRET_KEY is generated automatically by Render.
+
+# Set after the frontend is created:
+CORS_ORIGINS=["https://YOUR-FRONTEND.onrender.com"]
+
+# Leave Claude settings exactly as they currently are.
+# Add ANTHROPIC_API_KEY later when you are ready.
+
+# Render frontend static site:
+VITE_API_URL=https://YOUR-BACKEND.onrender.com/api/v1

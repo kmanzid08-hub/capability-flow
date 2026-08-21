@@ -1,0 +1,302 @@
+"""Add employment and project experience."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision: str = "20260817_0004"
+down_revision: str | None = "20260817_0003"
+branch_labels: Sequence[str] | None = None
+depends_on: Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "employment_experiences",
+        sa.Column(
+            "organization_id",
+            sa.Uuid(),
+            nullable=False,
+        ),
+        sa.Column(
+            "person_id",
+            sa.Uuid(),
+            nullable=False,
+        ),
+        sa.Column(
+            "employer_name",
+            sa.String(length=250),
+            nullable=False,
+        ),
+        sa.Column(
+            "job_title",
+            sa.String(length=250),
+            nullable=False,
+        ),
+        sa.Column(
+            "employment_type",
+            sa.String(length=50),
+            nullable=True,
+        ),
+        sa.Column(
+            "industry",
+            sa.String(length=150),
+            nullable=True,
+        ),
+        sa.Column(
+            "location",
+            sa.String(length=250),
+            nullable=True,
+        ),
+        sa.Column(
+            "country",
+            sa.String(length=100),
+            nullable=True,
+        ),
+        sa.Column(
+            "start_date",
+            sa.Date(),
+            nullable=False,
+        ),
+        sa.Column(
+            "end_date",
+            sa.Date(),
+            nullable=True,
+        ),
+        sa.Column(
+            "is_current",
+            sa.Boolean(),
+            nullable=False,
+        ),
+        sa.Column(
+            "description",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "responsibilities",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "achievements",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "id",
+            sa.Uuid(),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["organization_id"],
+            ["organizations.id"],
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["person_id"],
+            ["people.id"],
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    op.create_index(
+        "ix_employment_experiences_organization_id",
+        "employment_experiences",
+        ["organization_id"],
+    )
+
+    op.create_index(
+        "ix_employment_experiences_person_id",
+        "employment_experiences",
+        ["person_id"],
+    )
+
+    op.create_index(
+        "ix_employment_experiences_org_person",
+        "employment_experiences",
+        [
+            "organization_id",
+            "person_id",
+        ],
+    )
+
+    op.create_index(
+        "ix_employment_experiences_org_employer",
+        "employment_experiences",
+        [
+            "organization_id",
+            "employer_name",
+        ],
+    )
+
+    op.create_table(
+        "project_experiences",
+        sa.Column(
+            "organization_id",
+            sa.Uuid(),
+            nullable=False,
+        ),
+        sa.Column(
+            "person_id",
+            sa.Uuid(),
+            nullable=False,
+        ),
+        sa.Column(
+            "project_name",
+            sa.String(length=300),
+            nullable=False,
+        ),
+        sa.Column(
+            "client_name",
+            sa.String(length=250),
+            nullable=True,
+        ),
+        sa.Column(
+            "role",
+            sa.String(length=250),
+            nullable=False,
+        ),
+        sa.Column(
+            "sector",
+            sa.String(length=150),
+            nullable=True,
+        ),
+        sa.Column(
+            "location",
+            sa.String(length=250),
+            nullable=True,
+        ),
+        sa.Column(
+            "country",
+            sa.String(length=100),
+            nullable=True,
+        ),
+        sa.Column(
+            "start_date",
+            sa.Date(),
+            nullable=False,
+        ),
+        sa.Column(
+            "end_date",
+            sa.Date(),
+            nullable=True,
+        ),
+        sa.Column(
+            "is_current",
+            sa.Boolean(),
+            nullable=False,
+        ),
+        sa.Column(
+            "description",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "responsibilities",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "outcomes",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "skills_summary",
+            sa.Text(),
+            nullable=True,
+        ),
+        sa.Column(
+            "id",
+            sa.Uuid(),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["organization_id"],
+            ["organizations.id"],
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["person_id"],
+            ["people.id"],
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    op.create_index(
+        "ix_project_experiences_organization_id",
+        "project_experiences",
+        ["organization_id"],
+    )
+
+    op.create_index(
+        "ix_project_experiences_person_id",
+        "project_experiences",
+        ["person_id"],
+    )
+
+    op.create_index(
+        "ix_project_experiences_org_person",
+        "project_experiences",
+        [
+            "organization_id",
+            "person_id",
+        ],
+    )
+
+    op.create_index(
+        "ix_project_experiences_org_project",
+        "project_experiences",
+        [
+            "organization_id",
+            "project_name",
+        ],
+    )
+
+    op.create_index(
+        "ix_project_experiences_org_sector",
+        "project_experiences",
+        [
+            "organization_id",
+            "sector",
+        ],
+    )
+
+
+def downgrade() -> None:
+    op.drop_table(
+        "project_experiences",
+    )
+
+    op.drop_table(
+        "employment_experiences",
+    )

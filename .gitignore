@@ -15,3 +15,22 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+backend/storage/
+
+# Local development artifacts
+*.tsbuildinfo
+backend/backend/
+capability_flow_automatic_intake/
+/src/
+backend/*_files.txt
+backend/final_*.txt
+backend/opportunity_operations_backend.txt
+backend/phase2*.txt
+frontend/*_files.txt
+frontend/opportunity_operations_frontend.txt
+frontend/phase2*.txt
+README_FIX.txt
+README_INSTALL.txt
+backend/BACKEND_RECONCILIATION_GUIDE.txt
+backend/FINAL_BACKEND_FIX_GUIDE.txt
+backend/README_CLAUDE_SWITCH.txt

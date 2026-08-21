@@ -5,12 +5,20 @@ description = "Capability Flow API"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.14,<2",
+  "beautifulsoup4>=4.13,<5",
   "email-validator>=2.2,<3",
   "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "openai>=2.48,<3",
+  "openpyxl>=3.1,<4",
   "pwdlib[argon2]>=0.2,<1",
   "pydantic-settings>=2.7,<3",
   "psycopg[binary]>=3.2,<4",
   "pyjwt>=2.10,<3",
+  "pypdf>=5,<7",
+  "python-docx>=1.1,<2",
+  "python-multipart>=0.0.20,<1",
+  "python-pptx>=1.0,<2",
   "sqlalchemy>=2.0.36,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
@@ -18,7 +26,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "aiosqlite>=0.20,<1",
-  "httpx>=0.28,<1",
   "mypy>=1.14,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<1",

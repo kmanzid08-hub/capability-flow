@@ -13,42 +13,74 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+function requestHeaders(
+  init: RequestInit,
+): Headers {
   const headers = new Headers(init.headers);
 
-  headers.set("Content-Type", "application/json");
+  if (
+    init.body &&
+    !(init.body instanceof FormData)
+  ) {
+    headers.set(
+      "Content-Type",
+      "application/json",
+    );
+  }
 
   const token = session.token();
   const organization = session.organization();
 
   if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
+    headers.set(
+      "Authorization",
+      `Bearer ${token}`,
+    );
   }
 
   if (organization) {
-    headers.set("X-Organization-ID", organization);
+    headers.set(
+      "X-Organization-ID",
+      organization,
+    );
   }
 
-  const response = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers,
-  });
+  return headers;
+}
+
+async function errorFromResponse(
+  response: Response,
+): Promise<ApiError> {
+  const body = await response
+    .json()
+    .catch(() => ({
+      detail:
+        "The request could not be completed",
+    }));
+
+  return new ApiError(
+    response.status,
+    typeof body.detail === "string"
+      ? body.detail
+      : "The request could not be completed",
+  );
+}
+
+export async function api<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const response = await fetch(
+    `${API_URL}${path}`,
+    {
+      ...init,
+      headers: requestHeaders(init),
+    },
+  );
 
   if (!response.ok) {
-    const body = await response
-      .json()
-      .catch(() => ({
-        detail: "The request could not be completed",
-      }));
-
-    throw new ApiError(
-      response.status,
-      typeof body.detail === "string"
-        ? body.detail
-        : "The request could not be completed",
+    throw await errorFromResponse(
+      response,
     );
   }
 
@@ -57,4 +89,41 @@ export async function api<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+export async function apiDownload(
+  path: string,
+  filename: string,
+): Promise<void> {
+  const response = await fetch(
+    `${API_URL}${path}`,
+    {
+      headers: requestHeaders({}),
+    },
+  );
+
+  if (!response.ok) {
+    throw await errorFromResponse(
+      response,
+    );
+  }
+
+  const blob = await response.blob();
+
+  const objectUrl =
+    window.URL.createObjectURL(blob);
+
+  const anchor =
+    document.createElement("a");
+
+  anchor.href = objectUrl;
+  anchor.download = filename;
+
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  window.URL.revokeObjectURL(
+    objectUrl,
+  );
 }

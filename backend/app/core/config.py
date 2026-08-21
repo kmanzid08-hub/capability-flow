@@ -1,6 +1,7 @@
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,11 +11,63 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://capability_flow:capability_flow@localhost:5432/capability_flow"
     )
-    jwt_secret_key: str = Field(default="development-only-change-this-secret-key", min_length=32)
+    jwt_secret_key: str = Field(
+        default="development-only-change-this-secret-key",
+        min_length=32,
+    )
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     cors_origins: list[str] = ["http://localhost:5173"]
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    document_storage_path: Path = Path("storage/documents")
+    document_max_file_size_mb: int = Field(
+        default=25,
+        ge=1,
+        le=250,
+    )
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @field_validator(
+        "database_url",
+        mode="before",
+    )
+    @classmethod
+    def normalize_postgres_driver(
+        cls,
+        value: object,
+    ) -> object:
+        if not isinstance(value, str):
+            return value
+
+        if value.startswith(
+            "postgresql+psycopg://",
+        ):
+            return value
+
+        if value.startswith(
+            "postgresql://",
+        ):
+            return value.replace(
+                "postgresql://",
+                "postgresql+psycopg://",
+                1,
+            )
+
+        if value.startswith(
+            "postgres://",
+        ):
+            return value.replace(
+                "postgres://",
+                "postgresql+psycopg://",
+                1,
+            )
+
+        return value
 
 
 @lru_cache
