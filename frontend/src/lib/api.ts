@@ -1,7 +1,9 @@
 import { session } from "./session";
 
-const API_URL =
+export const API_URL =
   import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
+
+const DEFAULT_TIMEOUT_MS = 20000;
 
 export class ApiError extends Error {
   constructor(
@@ -70,13 +72,40 @@ export async function api<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(
-    `${API_URL}${path}`,
-    {
-      ...init,
-      headers: requestHeaders(init),
-    },
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    DEFAULT_TIMEOUT_MS,
   );
+
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${API_URL}${path}`,
+      {
+        ...init,
+        headers: requestHeaders(init),
+        signal: init.signal ?? controller.signal,
+      },
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiError(
+        0,
+        "The request timed out. Please try again.",
+      );
+    }
+
+    throw new ApiError(
+      0,
+      error instanceof Error
+        ? error.message
+        : "Unable to reach the server.",
+    );
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     throw await errorFromResponse(

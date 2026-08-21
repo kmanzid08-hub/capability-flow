@@ -34,7 +34,7 @@ import {
   PageHeader,
   TextArea,
 } from "../components/ui";
-import { api } from "../lib/api";
+import { API_URL, api } from "../lib/api";
 import { session } from "../lib/session";
 import type {
   CurrentUser,
@@ -52,8 +52,8 @@ const wrapper =
   "mx-auto max-w-7xl px-6 py-10 lg:px-10";
 
 const authSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(12),
+  email: z.string().email("Enter a valid email address."),
+  password: z.string().min(12, "Password must be at least 12 characters."),
 });
 
 type AuthValues = z.infer<typeof authSchema>;
@@ -117,6 +117,7 @@ function AuthFrame({
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
     register,
@@ -127,33 +128,37 @@ export function LoginPage() {
   });
 
   const login = useMutation({
-    mutationFn: (values: AuthValues) =>
-      api<{
-        access_token: string;
-      }>("/auth/login", {
-        method: "POST",
-        body: JSON.stringify(values),
-      }),
+    mutationFn: async (values: AuthValues) => {
+      setSubmitError(null);
 
-    onSuccess: async ({
-      access_token,
-    }) => {
-      localStorage.setItem(
-        "capability-flow-token",
-        access_token,
+      const { access_token } = await api<{ access_token: string }>(
+        "/auth/login",
+        {
+          method: "POST",
+          body: JSON.stringify(values),
+        },
       );
 
-      const me =
-        await api<CurrentUser>(
-          "/auth/me",
-        );
+      localStorage.setItem("capability-flow-token", access_token);
 
-      session.set(
-        access_token,
-        me.memberships[0].organization_id,
-      );
+      const me = await api<CurrentUser>("/auth/me");
+      const membership = me.memberships[0];
 
+      if (!membership) {
+        throw new Error("Your account does not have an active organization membership.");
+      }
+
+      return { access_token, organization_id: membership.organization_id };
+    },
+
+    onSuccess: ({ access_token, organization_id }) => {
+      session.set(access_token, organization_id);
       navigate("/");
+    },
+
+    onError: (error) => {
+      localStorage.removeItem("capability-flow-token");
+      setSubmitError(error instanceof Error ? error.message : "Sign in failed.");
     },
   });
 
@@ -164,18 +169,17 @@ export function LoginPage() {
     >
       <form
         className="space-y-5"
+        noValidate
         onSubmit={handleSubmit(
-          (values) =>
-            login.mutate(values),
+          (values) => login.mutate(values),
+          () => setSubmitError("Please correct the highlighted fields and try again."),
         )}
       >
         <Field
           label="Work email"
           type="email"
           autoComplete="email"
-          error={
-            errors.email?.message
-          }
+          error={errors.email?.message}
           {...register("email")}
         />
 
@@ -183,36 +187,28 @@ export function LoginPage() {
           label="Password"
           type="password"
           autoComplete="current-password"
-          error={
-            errors.password?.message
-          }
+          error={errors.password?.message}
           {...register("password")}
         />
 
-        {login.error && (
+        {(submitError || login.error) && (
           <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
-            {login.error.message}
+            {submitError ?? login.error?.message}
           </p>
         )}
 
-        <Button
-          type="submit"
-          disabled={
-            login.isPending
-          }
-        >
-          {login.isPending
-            ? "Signing in…"
-            : "Sign in"}
+        <Button type="submit" disabled={login.isPending}>
+          {login.isPending ? "Signing in…" : "Sign in"}
         </Button>
       </form>
 
+      <p className="mt-4 break-all text-xs text-slate-400">
+        API: {API_URL}
+      </p>
+
       <p className="mt-8 text-sm text-slate-500">
         New to Capability Flow?{" "}
-        <Link
-          className="font-semibold text-evergreen"
-          to="/register"
-        >
+        <Link className="font-semibold text-evergreen" to="/register">
           Create an organization
         </Link>
       </p>
@@ -222,18 +218,21 @@ export function LoginPage() {
 
 const registrationSchema =
   authSchema.extend({
-    organization_name:
-      z.string().min(2),
+    organization_name: z
+      .string()
+      .min(2, "Organization name must be at least 2 characters."),
 
     organization_slug:
       z
         .string()
         .regex(
           /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
+          "Use lowercase letters, numbers, and single hyphens only.",
         ),
 
-    full_name:
-      z.string().min(2),
+    full_name: z
+      .string()
+      .min(2, "Full name must be at least 2 characters."),
   });
 
 type RegistrationValues =
@@ -243,42 +242,37 @@ type RegistrationValues =
 
 export function RegisterPage() {
   const navigate = useNavigate();
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
     register,
     handleSubmit,
     formState: { errors },
-  } =
-    useForm<RegistrationValues>({
-      resolver: zodResolver(
-        registrationSchema,
-      ),
-    });
+  } = useForm<RegistrationValues>({
+    resolver: zodResolver(registrationSchema),
+  });
 
   const mutation = useMutation({
-    mutationFn: (
-      values: RegistrationValues,
-    ) =>
-      api<{
+    mutationFn: (values: RegistrationValues) => {
+      setSubmitError(null);
+      return api<{
         access_token: string;
         organization_id: string;
-      }>(
-        "/auth/register-organization",
-        {
-          method: "POST",
-          body: JSON.stringify(
-            values,
-          ),
-        },
-      ),
+      }>("/auth/register-organization", {
+        method: "POST",
+        body: JSON.stringify(values),
+      });
+    },
 
     onSuccess: (data) => {
-      session.set(
-        data.access_token,
-        data.organization_id,
-      );
-
+      session.set(data.access_token, data.organization_id);
       navigate("/");
+    },
+
+    onError: (error) => {
+      setSubmitError(
+        error instanceof Error ? error.message : "Workspace creation failed.",
+      );
     },
   });
 
@@ -289,96 +283,66 @@ export function RegisterPage() {
     >
       <form
         className="grid gap-4"
+        noValidate
         onSubmit={handleSubmit(
-          (values) =>
-            mutation.mutate(
-              values,
-            ),
+          (values) => mutation.mutate(values),
+          () => setSubmitError("Please correct the highlighted fields and try again."),
         )}
       >
         <Field
           label="Organization name"
-          error={
-            errors
-              .organization_name
-              ?.message
-          }
-          {...register(
-            "organization_name",
-          )}
+          error={errors.organization_name?.message}
+          {...register("organization_name")}
         />
 
         <Field
           label="Workspace slug"
           placeholder="acme-group"
-          error={
-            errors
-              .organization_slug
-              ?.message
-          }
-          {...register(
-            "organization_slug",
-          )}
+          error={errors.organization_slug?.message}
+          {...register("organization_slug")}
         />
 
         <Field
           label="Your full name"
-          error={
-            errors.full_name
-              ?.message
-          }
-          {...register(
-            "full_name",
-          )}
+          error={errors.full_name?.message}
+          {...register("full_name")}
         />
 
         <Field
           label="Work email"
           type="email"
-          error={
-            errors.email?.message
-          }
+          autoComplete="email"
+          error={errors.email?.message}
           {...register("email")}
         />
 
         <Field
           label="Password"
           type="password"
+          autoComplete="new-password"
           placeholder="At least 12 characters"
-          error={
-            errors.password
-              ?.message
-          }
-          {...register(
-            "password",
-          )}
+          error={errors.password?.message}
+          {...register("password")}
         />
 
-        {mutation.error && (
-          <p className="text-sm text-red-700">
-            {
-              mutation.error
-                .message
-            }
+        {(submitError || mutation.error) && (
+          <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
+            {submitError ?? mutation.error?.message}
           </p>
         )}
 
-        <Button
-          type="submit"
-          disabled={
-            mutation.isPending
-          }
-        >
-          Create workspace
+        <Button type="submit" disabled={mutation.isPending}>
+          {mutation.isPending ? "Creating workspace…" : "Create workspace"}
         </Button>
       </form>
 
+      <p className="mt-4 break-all text-xs text-slate-400">
+        API: {API_URL}
+      </p>
+
       <p className="mt-6 text-sm text-slate-500">
         Already registered?{" "}
-        <Link
-          className="font-semibold text-evergreen"
-          to="/login"
-        >
+        <Link className="font-semibold text-evergreen" to="/login">
           Sign in
         </Link>
       </p>
@@ -433,8 +397,7 @@ export function DashboardPage() {
         Build a structured
         picture of your people,
         qualifications,
-        certifications,
-        documents, and
+        certifications, and
         capabilities.
       </PageHeader>
 
@@ -486,7 +449,7 @@ export function DashboardPage() {
           skills, education,
           professional
           certifications, and
-          supporting evidence.
+          supporting records.
         </p>
 
         <Link
@@ -807,7 +770,7 @@ export function AddPersonPage() {
         certifications,
         work experience,
         projects, and
-        documents can be
+        capability records can be
         added immediately
         after saving.
       </PageHeader>
@@ -1894,15 +1857,6 @@ function CertificationPanel({
             ],
           },
         );
-
-        queryClient.invalidateQueries(
-          {
-            queryKey: [
-              "documents",
-              personId,
-            ],
-          },
-        );
       },
     });
 
@@ -1918,9 +1872,7 @@ function CertificationPanel({
             Professional
             credentials and
             certifications.
-            Supporting files
-            can be linked from
-            the Documents tab.
+            Verification details can be recorded with the credential.
           </p>
         </div>
 
@@ -2169,11 +2121,11 @@ function formatExperiencePeriod(
     ? "Present"
     : endDate
       ? new Date(
-          `${endDate}T00:00:00`,
-        ).toLocaleDateString(undefined, {
-          year: "numeric",
-          month: "short",
-        })
+        `${endDate}T00:00:00`,
+      ).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+      })
       : "Not recorded";
 
   return `${start} – ${end}`;
@@ -3284,9 +3236,9 @@ export function PersonPage() {
                   )
                 }
                 className={`whitespace-nowrap border-b-2 px-4 py-4 text-sm font-semibold transition ${tab ===
-                    item.id
-                    ? "border-mint text-white"
-                    : "border-transparent text-white/50 hover:text-white"
+                  item.id
+                  ? "border-mint text-white"
+                  : "border-transparent text-white/50 hover:text-white"
                   }`}
               >
                 {
@@ -3434,12 +3386,12 @@ export function OrganizationPage() {
     email: string;
     full_name: string;
     role:
-      | "owner"
-      | "admin"
-      | "manager"
-      | "data_entry"
-      | "reviewer"
-      | "viewer";
+    | "owner"
+    | "admin"
+    | "manager"
+    | "data_entry"
+    | "reviewer"
+    | "viewer";
     is_active: boolean;
     created_at: string;
   };
@@ -3467,9 +3419,9 @@ export function OrganizationPage() {
 
   const canManageMembers =
     organization.data?.role ===
-      "owner" ||
+    "owner" ||
     organization.data?.role ===
-      "admin";
+    "admin";
 
   const members = useQuery({
     queryKey: [
@@ -3894,11 +3846,10 @@ export function OrganizationPage() {
                                 },
                               )
                             }
-                            className={`rounded-xl px-3 py-2.5 text-sm font-semibold ${
-                              member.is_active
+                            className={`rounded-xl px-3 py-2.5 text-sm font-semibold ${member.is_active
                                 ? "bg-emerald-50 text-emerald-700"
                                 : "bg-slate-100 text-slate-500"
-                            }`}
+                              }`}
                           >
                             {member.is_active
                               ? "Active"
@@ -3910,11 +3861,11 @@ export function OrganizationPage() {
 
                     {!members.data
                       ?.length && (
-                      <p className="p-5 text-sm text-slate-500">
-                        No members
-                        found.
-                      </p>
-                    )}
+                        <p className="p-5 text-sm text-slate-500">
+                          No members
+                          found.
+                        </p>
+                      )}
                   </div>
                 )}
               </div>
