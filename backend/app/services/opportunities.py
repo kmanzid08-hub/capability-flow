@@ -360,15 +360,10 @@ class OpportunityService:
         if existing is not None:
             return existing
 
+        # Pilot mode: keep fetched source text and metadata in PostgreSQL.
+        # Do not persist URL snapshots to the web service filesystem.
         stored_filename = None
         storage_path = None
-        if ingested.original_bytes is not None:
-            stored_filename, storage_path = self.source_storage.store(
-                organization_id=self.organization_id,
-                opportunity_id=opportunity_id,
-                content=ingested.original_bytes,
-                filename=ingested.suggested_filename or "source.html",
-            )
 
         source = OpportunitySource(
             organization_id=self.organization_id,
@@ -378,7 +373,7 @@ class OpportunityService:
             original_filename=ingested.suggested_filename,
             stored_filename=stored_filename,
             storage_path=storage_path,
-            file_size=len(ingested.original_bytes) if ingested.original_bytes is not None else None,
+            file_size=None,
             raw_text=ingested.text,
             content_hash=ingested.content_hash,
             mime_type=ingested.mime_type,

@@ -7,6 +7,7 @@ import {
     ChevronDown,
     ChevronUp,
     CircleHelp,
+    Download,
     FileText,
     Link2,
     LoaderCircle,
@@ -18,8 +19,8 @@ import {
     Search,
     Send,
     Sparkles,
+    Trash2,
     Trophy,
-    Upload,
     X,
     XCircle,
 } from "lucide-react";
@@ -41,7 +42,7 @@ import {
     PageHeader,
     TextArea,
 } from "../components/ui";
-import { api } from "../lib/api";
+import { api, apiDownload } from "../lib/api";
 import type {
     CandidateMatch,
     CapabilityGap,
@@ -59,8 +60,26 @@ const wrapper =
 
 type IntakeMode =
     | "url"
-    | "text"
-    | "file";
+    | "text";
+
+type OpportunitySource = {
+    id: string;
+    opportunity_id: string;
+    source_type: string;
+    source_url: string | null;
+    original_filename: string | null;
+    stored_filename: string | null;
+    mime_type: string | null;
+    file_size: number | null;
+    content_hash: string;
+    created_at: string;
+    updated_at: string;
+    };
+
+type OpportunityIntakeResponse = {
+    opportunity: Opportunity;
+    source: OpportunitySource;
+};
 
 type WorkspaceTab =
     | "overview"
@@ -244,10 +263,6 @@ function IntakeForm({
 }) {
     const navigate = useNavigate();
     const queryClient = useQueryClient();
-    const fileRef =
-        React.useRef<HTMLInputElement | null>(
-            null,
-        );
 
     const [mode, setMode] =
         React.useState<IntakeMode>("url");
@@ -259,111 +274,78 @@ function IntakeForm({
         React.useState("");
     const [text, setText] =
         React.useState("");
-    const [file, setFile] =
-        React.useState<File | null>(null);
 
     const mutation = useMutation({
         mutationFn: async () => {
-            let opportunity: Opportunity;
-
             if (opportunityId) {
-                opportunity = await api<Opportunity>(
-                    `/opportunities/${opportunityId}`,
-                );
-            } else {
-                opportunity = await api<Opportunity>(
-                    "/opportunities",
-                    {
-                        method: "POST",
-                        body: JSON.stringify({
-                            title:
-                                title.trim() ||
-                                "Untitled opportunity",
-                            client_name:
-                                clientName.trim() || null,
-                            source_url:
-                                mode === "url" && url.trim()
-                                    ? url.trim()
-                                    : null,
-                        }),
-                    },
-                );
-            }
+                let source: { id: string; status: string };
 
-            if (mode === "url") {
-                if (!url.trim()) {
-                    throw new Error(
-                        "Paste the opportunity URL first.",
+                if (mode === "url") {
+                    if (!url.trim()) {
+                        throw new Error("Paste the opportunity URL first.");
+                    }
+                    source = await api(
+                        `/opportunities/${opportunityId}/sources/url`,
+                        {
+                            method: "POST",
+                            body: JSON.stringify({ url: url.trim() }),
+                        },
+                    );
+                } else {
+                    if (text.trim().length < 20) {
+                        throw new Error(
+                            "Paste at least 20 characters of the client requirement.",
+                        );
+                    }
+                    source = await api(
+                        `/opportunities/${opportunityId}/sources/text`,
+                        {
+                            method: "POST",
+                            body: JSON.stringify({ text: text.trim() }),
+                        },
                     );
                 }
 
-                await api<{
-                    id: string;
-                    status: string;
-                }>(
-                    `/opportunities/${opportunity.id}/sources/url`,
+                void source;
+                return api<Opportunity>(`/opportunities/${opportunityId}`);
+            }
+
+            let intake: OpportunityIntakeResponse;
+            if (mode === "url") {
+                if (!url.trim()) {
+                    throw new Error("Paste the opportunity URL first.");
+                }
+                intake = await api<OpportunityIntakeResponse>(
+                    "/opportunities/intake/url",
                     {
                         method: "POST",
                         body: JSON.stringify({
                             url: url.trim(),
+                            title: title.trim() || null,
+                            client_name: clientName.trim() || null,
                         }),
                     },
                 );
-            }
-
-            if (mode === "text") {
+            } else {
                 if (text.trim().length < 20) {
                     throw new Error(
                         "Paste at least 20 characters of the client requirement.",
                     );
                 }
-
-                await api<{
-                    id: string;
-                    status: string;
-                }>(
-                    `/opportunities/${opportunity.id}/sources/text`,
+                intake = await api<OpportunityIntakeResponse>(
+                    "/opportunities/intake/text",
                     {
                         method: "POST",
                         body: JSON.stringify({
                             text: text.trim(),
+                            title: title.trim() || null,
+                            client_name: clientName.trim() || null,
                         }),
                     },
                 );
             }
 
-            if (mode === "file") {
-                if (!file) {
-                    throw new Error(
-                        "Choose a requirement document first.",
-                    );
-                }
-
-                const form = new FormData();
-                form.append("file", file);
-
-                await api<{
-                    id: string;
-                    status: string;
-                }>(
-                    `/opportunities/${opportunity.id}/sources/file`,
-                    {
-                        method: "POST",
-                        body: form,
-                    },
-                );
-            }
-
-            await api<OpportunityAnalysis>(
-                `/opportunities/${opportunity.id}/analyze`,
-                {
-                    method: "POST",
-                },
-            );
-
-            return api<Opportunity>(
-                `/opportunities/${opportunity.id}`,
-            );
+            return intake.opportunity;
         },
 
         onSuccess: (opportunity) => {
@@ -384,6 +366,12 @@ function IntakeForm({
                     opportunity.id,
                 ],
             });
+            queryClient.invalidateQueries({
+                queryKey: [
+                    "opportunity-sources",
+                    opportunity.id,
+                ],
+            });
 
             onComplete?.(opportunity);
 
@@ -398,9 +386,7 @@ function IntakeForm({
     const canSubmit =
         mode === "url"
             ? Boolean(url.trim())
-            : mode === "text"
-                ? text.trim().length >= 20
-                : Boolean(file);
+            : text.trim().length >= 20;
 
     return (
         <section
@@ -418,7 +404,7 @@ function IntakeForm({
                             : "text-mint"
                             }`}
                     >
-                        Requirement intelligence
+                        Opportunity intake
                     </p>
 
                     <h2
@@ -438,11 +424,9 @@ function IntakeForm({
                             : "text-white/55"
                             }`}
                     >
-                        Paste the posting URL, paste the
-                        requirement itself, or upload the
-                        TOR/RFP. Capability Flow will extract
-                        the roles and requirements and match
-                        your people automatically.
+                        Capture the original posting, TOR, RFP or requirement
+                        source. Capability Flow preserves the extracted text and
+                        prepares the opportunity for capability analysis.
                     </p>
                 </div>
 
@@ -489,7 +473,6 @@ function IntakeForm({
                     [
                         ["url", "Website URL", Link2],
                         ["text", "Paste text", FileText],
-                        ["file", "Upload document", Upload],
                     ] as const
                 ).map(([value, label, Icon]) => (
                     <button
@@ -544,69 +527,6 @@ function IntakeForm({
                     />
                 )}
 
-                {mode === "file" && (
-                    <div
-                        className={`rounded-2xl border-2 border-dashed p-6 text-center ${compact
-                            ? "border-slate-300 bg-slate-50"
-                            : "border-white/20 bg-white/5"
-                            }`}
-                    >
-                        <Upload
-                            size={28}
-                            className={`mx-auto ${compact
-                                ? "text-slate-300"
-                                : "text-white/35"
-                                }`}
-                        />
-
-                        <p
-                            className={`mt-3 font-semibold ${compact
-                                ? "text-ink"
-                                : "text-white"
-                                }`}
-                        >
-                            Upload the source requirement
-                        </p>
-
-                        <p
-                            className={`mt-1 text-xs ${compact
-                                ? "text-slate-500"
-                                : "text-white/45"
-                                }`}
-                        >
-                            PDF, DOCX, XLSX or PPTX • maximum
-                            25 MB
-                        </p>
-
-                        <input
-                            ref={fileRef}
-                            type="file"
-                            accept=".pdf,.docx,.xlsx,.pptx"
-                            className={`mt-4 block w-full text-sm ${compact
-                                ? "text-slate-600"
-                                : "text-white/60"
-                                } file:mr-4 file:rounded-lg file:border-0 file:bg-evergreen file:px-4 file:py-2.5 file:font-semibold file:text-white`}
-                            onChange={(event) =>
-                                setFile(
-                                    event.target.files?.[0] ??
-                                    null,
-                                )
-                            }
-                        />
-
-                        {file && (
-                            <p
-                                className={`mt-3 text-sm ${compact
-                                    ? "text-slate-600"
-                                    : "text-white/65"
-                                    }`}
-                            >
-                                Selected:{" "}
-                                <strong>{file.name}</strong>
-                            </p>
-                        )}
-                    </div>
-                )}
             </div>
 
             {mutation.error && (
@@ -677,10 +597,9 @@ export function OpportunitiesPage() {
                 eyebrow="Opportunity intelligence"
                 title="Opportunities"
             >
-                Give Capability Flow the client's source.
-                It extracts the requested team, ranks your
-                people, explains every match, and shows
-                capability gaps.
+                Capture the client's original source first. Once intelligence
+                analysis is configured, the same workspace ranks people, explains
+                matches and builds recommended teams.
             </PageHeader>
 
             <IntakeForm />
@@ -726,7 +645,7 @@ export function OpportunitiesPage() {
                 ) : opportunities.length === 0 ? (
                     <EmptyState
                         title="No opportunities yet"
-                        text="Paste your first client posting, tender URL, TOR, RFP, or requirement document above."
+                        text="Paste your first client posting, tender URL, TOR, RFP, or requirement text above."
                     />
                 ) : (
                     <div className="grid gap-4">
@@ -1541,6 +1460,122 @@ function GapsPanel({
                     </article>
                 ),
             )}
+        </div>
+    );
+}
+
+function SourcesPanel({
+    opportunityId,
+}: {
+    opportunityId: string;
+}) {
+    const queryClient = useQueryClient();
+    const query = useQuery({
+        queryKey: ["opportunity-sources", opportunityId],
+        queryFn: () =>
+            api<OpportunitySource[]>(
+                `/opportunities/${opportunityId}/sources`,
+            ),
+    });
+
+    const remove = useMutation({
+        mutationFn: (sourceId: string) =>
+            api<void>(
+                `/opportunities/${opportunityId}/sources/${sourceId}`,
+                { method: "DELETE" },
+            ),
+        onSuccess: () => {
+            queryClient.invalidateQueries({
+                queryKey: ["opportunity-sources", opportunityId],
+            });
+        },
+    });
+
+    if (query.isLoading) {
+        return (
+            <p className="rounded-2xl bg-white p-5 text-sm text-slate-500">
+                Loading captured sources…
+            </p>
+        );
+    }
+
+    if (query.error) {
+        return (
+            <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">
+                {query.error.message}
+            </p>
+        );
+    }
+
+    if (!query.data?.length) {
+        return (
+            <EmptyState
+                title="No sources yet"
+                text="Add the original URL or pasted client requirement."
+            />
+        );
+    }
+
+    return (
+        <div className="grid gap-3">
+            {query.data.map((source) => (
+                <article
+                    key={source.id}
+                    className="rounded-2xl border border-slate-200 bg-white p-5"
+                >
+                    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                        <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <StatusBadge value={source.source_type} />
+                                {source.file_size != null && (
+                                    <span className="text-xs text-slate-400">
+                                        {(source.file_size / 1024).toFixed(1)} KB
+                                    </span>
+                                )}
+                            </div>
+                            <p className="mt-3 truncate font-semibold">
+                                {source.original_filename ||
+                                    source.source_url ||
+                                    "Pasted requirement text"}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-400">
+                                Captured {formatDate(source.created_at)}
+                            </p>
+                        </div>
+
+                        <div className="flex shrink-0 gap-2">
+                            {source.stored_filename && (
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        void apiDownload(
+                                            `/opportunities/${opportunityId}/sources/${source.id}/download`,
+                                            source.original_filename || "opportunity-source",
+                                        )
+                                    }
+                                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold hover:bg-slate-50"
+                                >
+                                    <Download size={15} />
+                                    Snapshot
+                                </button>
+                            )}
+                            <button
+                                type="button"
+                                disabled={remove.isPending}
+                                onClick={() => {
+                                    if (window.confirm("Delete this captured source?")) {
+                                        remove.mutate(source.id);
+                                    }
+                                }}
+                                className="rounded-xl border border-slate-200 p-2.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                                aria-label="Delete source"
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
+                    </div>
+                </article>
+            ))}
         </div>
     );
 }
@@ -2558,23 +2593,26 @@ export function OpportunityPage() {
 
                 {tab === "sources" && (
                     <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-                        <IntakeForm
-                            compact
-                            opportunityId={
-                                opportunityId
-                            }
-                            onComplete={() => {
-                                queryClient.invalidateQueries({
-                                    queryKey: [
-                                        "opportunity-roles",
-                                        opportunityId,
-                                    ],
-                                });
-                                setTab(
-                                    "overview",
-                                );
-                            }}
-                        />
+                        <div className="space-y-6">
+                            <SourcesPanel opportunityId={opportunityId} />
+                            <IntakeForm
+                                compact
+                                opportunityId={
+                                    opportunityId
+                                }
+                                onComplete={() => {
+                                    queryClient.invalidateQueries({
+                                        queryKey: [
+                                            "opportunity-roles",
+                                            opportunityId,
+                                        ],
+                                    });
+                                    setTab(
+                                        "overview",
+                                    );
+                                }}
+                            />
+                        </div>
 
                         <aside className="rounded-2xl border border-slate-200 bg-white p-6">
                             <Paperclip
@@ -2587,7 +2625,7 @@ export function OpportunityPage() {
                             <p className="mt-2 text-sm leading-6 text-slate-500">
                                 Add the original posting plus
                                 any detailed TOR, RFP or
-                                supporting document. Every
+                                supporting requirement. Every
                                 re-analysis creates a new
                                 analysis version instead of
                                 destroying the previous one.
