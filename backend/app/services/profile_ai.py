@@ -27,7 +27,8 @@ from app.services.document_text import UnsupportedAnalysisDocument, extract_text
 logger = logging.getLogger(__name__)
 
 
-CATEGORIES = {"profile", "skill", "education", "certification", "employment", "project"}
+CATEGORIES = {"profile", "skill", "education",
+              "certification", "employment", "project"}
 
 SYSTEM_PROMPT = """You extract professional capability evidence from documents for a
 consulting/audit talent database.
@@ -168,7 +169,8 @@ class ProfileAIService:
                 self.settings.ai_max_document_chars,
             )
             result = await self._call_claude(person, document, text)
-            suggestions = self._build_suggestions(person_id, document_id, result)
+            suggestions = self._build_suggestions(
+                person_id, document_id, result)
 
             existing = await self.session.scalars(
                 select(ProfileSuggestion).where(
@@ -257,7 +259,8 @@ class ProfileAIService:
         cleaned = "".join(text_parts).strip()
         if cleaned.startswith("```"):
             cleaned = (
-                cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                cleaned.removeprefix("```json").removeprefix(
+                    "```").removesuffix("```").strip()
             )
         data = json.loads(cleaned)
         if not isinstance(data, dict):
@@ -302,7 +305,8 @@ class ProfileAIService:
                 payload = dict(item)
                 confidence_value = payload.pop("confidence", None)
                 confidence = (
-                    float(confidence_value) if isinstance(confidence_value, (int, float)) else None
+                    float(confidence_value) if isinstance(
+                        confidence_value, (int, float)) else None
                 )
                 title = str(payload.get(title_key) or category.title())[:250]
                 rows.append(
@@ -333,7 +337,8 @@ class ProfileAIService:
             category=category,
             title=title,
             payload=payload,
-            confidence=(max(0.0, min(1.0, confidence)) if confidence is not None else None),
+            confidence=(max(0.0, min(1.0, confidence))
+                        if confidence is not None else None),
             status="pending",
             created_by_user_id=self.user_id,
         )

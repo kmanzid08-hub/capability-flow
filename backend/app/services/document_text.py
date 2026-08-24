@@ -1,30 +1,73 @@
 from io import BytesIO
 
 from docx import Document
+from legacy_doc import extract_text as extract_legacy_doc_text
 from openpyxl import load_workbook
 from pptx import Presentation
-from pypdf import PdfReader
 
 
 class UnsupportedAnalysisDocument(ValueError):
     pass
 
 
+TEXT_EXTRACTABLE_EXTENSIONS = {
+    ".doc",
+    ".docx",
+    ".txt",
+    ".csv",
+    ".rtf",
+    ".xlsx",
+    ".xlsm",
+    ".pptx",
+}
+
+CLAUDE_NATIVE_EXTENSIONS = {
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+}
+
+
+def is_claude_native_document(extension: str) -> bool:
+    return extension.lower() in CLAUDE_NATIVE_EXTENSIONS
+
+
 def extract_text(content: bytes, extension: str, max_chars: int) -> str:
     extension = extension.lower()
     text = ""
 
-    if extension == ".pdf":
-        reader = PdfReader(BytesIO(content))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    if extension == ".doc":
+        try:
+            result = extract_legacy_doc_text(content)
+            text = result.text
+        except Exception as exc:
+            raise UnsupportedAnalysisDocument(
+                "The legacy Word .doc file could not be read. "
+                "Try opening it in Word and saving it again if the file is damaged."
+            ) from exc
     elif extension == ".docx":
         document = Document(BytesIO(content))
-        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        lines: list[str] = []
+
+        for paragraph in document.paragraphs:
+            if paragraph.text.strip():
+                lines.append(paragraph.text)
+
+        for table in document.tables:
+            for row in table.rows:
+                values = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if values:
+                    lines.append(" | ".join(values))
+
+        text = "\n".join(lines)
     elif extension in {".txt", ".csv", ".rtf"}:
         text = content.decode("utf-8", errors="ignore")
     elif extension in {".xlsx", ".xlsm"}:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        lines: list[str] = []
+        lines = []
         for sheet in workbook.worksheets:
             lines.append(f"Sheet: {sheet.title}")
             for row in sheet.iter_rows(values_only=True):
@@ -35,16 +78,17 @@ def extract_text(content: bytes, extension: str, max_chars: int) -> str:
     elif extension == ".pptx":
         presentation = Presentation(BytesIO(content))
         slide_lines: list[str] = []
-        for slide in presentation.slides:
+        for slide_number, slide in enumerate(presentation.slides, start=1):
+            slide_lines.append(f"Slide {slide_number}")
             for shape in slide.shapes:
                 shape_text = getattr(shape, "text", "")
-                if shape_text:
+                if shape_text and str(shape_text).strip():
                     slide_lines.append(str(shape_text))
         text = "\n".join(slide_lines)
-    elif extension in {".jpg", ".jpeg", ".png"}:
+    elif is_claude_native_document(extension):
         raise UnsupportedAnalysisDocument(
-            "Image documents are stored safely, but this release does not run OCR. "
-            "Upload a PDF or text-based copy for AI extraction."
+            "This file type should be analyzed directly by Claude rather than "
+            "through local text extraction."
         )
     else:
         raise UnsupportedAnalysisDocument(
@@ -53,8 +97,5 @@ def extract_text(content: bytes, extension: str, max_chars: int) -> str:
 
     normalized = "\n".join(line.strip() for line in text.splitlines() if line.strip())
     if not normalized:
-        raise UnsupportedAnalysisDocument(
-            "No readable text was found. If this is a scanned document, upload a "
-            "text-searchable PDF."
-        )
+        raise UnsupportedAnalysisDocument("No readable text was found in this document.")
     return normalized[:max_chars]

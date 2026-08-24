@@ -11,6 +11,7 @@ dependencies = [
   "email-validator>=2.2,<3",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "legacy-doc>=0.1,<1",
   "openai>=2.48,<3",
   "openpyxl>=3.1,<4",
   "pwdlib[argon2]>=0.2,<1",
@@ -58,3 +59,6 @@ strict = true
 plugins = ["pydantic.mypy"]
 exclude = ["alembic"]
 
+[[tool.mypy.overrides]]
+module = "legacy_doc"
+ignore_missing_imports = true
