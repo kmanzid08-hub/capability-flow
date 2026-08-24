@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -22,6 +23,9 @@ from app.schemas.capability import CertificationCreate, EducationCreate, SkillCr
 from app.schemas.experience import EmploymentCreate, ProjectCreate
 from app.services.document_storage import create_document_storage
 from app.services.document_text import UnsupportedAnalysisDocument, extract_text
+
+logger = logging.getLogger(__name__)
+
 
 CATEGORIES = {"profile", "skill", "education", "certification", "employment", "project"}
 
@@ -199,6 +203,14 @@ class ProfileAIService:
         except HTTPException:
             raise
         except Exception as exc:
+            logger.exception(
+                "AI document analysis failed: person_id=%s document_id=%s "
+                "exception_type=%s error=%s",
+                person_id,
+                document_id,
+                type(exc).__name__,
+                str(exc),
+            )
             document.analysis_status = DocumentAnalysisStatus.FAILED.value
             document.analysis_error = (
                 "AI analysis failed. Please retry or review the document manually."
