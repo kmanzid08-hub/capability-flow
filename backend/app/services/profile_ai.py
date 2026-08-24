@@ -4,8 +4,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from anthropic import AsyncAnthropic
 from fastapi import HTTPException, status
+from google import genai
+from google.genai import types
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,12 +23,25 @@ from app.repositories.people import PersonRepository
 from app.schemas.capability import CertificationCreate, EducationCreate, SkillCreate
 from app.schemas.experience import EmploymentCreate, ProjectCreate
 from app.services.document_storage import create_document_storage
-from app.services.document_text import UnsupportedAnalysisDocument, extract_text
+from app.services.document_text import (
+    UnsupportedAnalysisDocument,
+    extract_text,
+    is_gemini_native_document,
+)
 
 logger = logging.getLogger(__name__)
 
 
 CATEGORIES = {"profile", "skill", "education", "certification", "employment", "project"}
+
+GEMINI_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 SYSTEM_PROMPT = """You extract professional capability evidence from documents for a
 consulting/audit talent database.
@@ -142,17 +156,18 @@ class ProfileAIService:
     async def analyze_document(self, person_id: uuid.UUID, document_id: uuid.UUID) -> int:
         person = await self.people.get(person_id)
         document = await self.documents.get(person_id, document_id)
+
         if person is None or document is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Person or document not found",
             )
-        if not self.settings.anthropic_api_key:
+
+        if not self.settings.gemini_api_key:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=(
-                    "AI analysis is not configured yet. Add ANTHROPIC_API_KEY on the "
-                    "backend service."
+                    "AI analysis is not configured yet. Add GEMINI_API_KEY on the backend service."
                 ),
             )
 
@@ -162,12 +177,22 @@ class ProfileAIService:
 
         try:
             content = await self.storage.read(document.storage_key)
-            text = extract_text(
-                content,
-                document.file_extension,
-                self.settings.ai_max_document_chars,
+            extension = document.file_extension.lower()
+
+            text: str | None = None
+            if not is_gemini_native_document(extension):
+                text = extract_text(
+                    content,
+                    extension,
+                    self.settings.ai_max_document_chars,
+                )
+
+            result = await self._call_gemini(
+                person=person,
+                document=document,
+                content=content,
+                text=text,
             )
-            result = await self._call_claude(person, document, text)
             suggestions = self._build_suggestions(person_id, document_id, result)
 
             existing = await self.session.scalars(
@@ -180,6 +205,7 @@ class ProfileAIService:
             )
             for suggestion in existing:
                 await self.session.delete(suggestion)
+
             for suggestion in suggestions:
                 self.session.add(suggestion)
 
@@ -188,20 +214,23 @@ class ProfileAIService:
                 if suggestions
                 else DocumentAnalysisStatus.COMPLETE.value
             )
+            document.analysis_error = None
             document.last_analyzed_at = datetime.now(UTC)
             await self.session.commit()
             return len(suggestions)
+
         except (UnsupportedAnalysisDocument, FileNotFoundError) as exc:
-            document.analysis_status = DocumentAnalysisStatus.FAILED.value
-            document.analysis_error = str(exc)
-            document.last_analyzed_at = datetime.now(UTC)
-            await self.session.commit()
+            await self.session.rollback()
+            await self._mark_analysis_failed(document_id, str(exc))
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
+
         except HTTPException:
+            await self.session.rollback()
             raise
+
         except Exception as exc:
             logger.exception(
                 "AI document analysis failed: person_id=%s document_id=%s "
@@ -211,24 +240,33 @@ class ProfileAIService:
                 type(exc).__name__,
                 str(exc),
             )
-            document.analysis_status = DocumentAnalysisStatus.FAILED.value
-            document.analysis_error = (
-                "AI analysis failed. Please retry or review the document manually."
+            await self.session.rollback()
+            await self._mark_analysis_failed(
+                document_id,
+                "AI analysis failed. Please retry or review the document manually.",
             )
-            document.last_analyzed_at = datetime.now(UTC)
-            await self.session.commit()
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="AI analysis failed. Please retry in a moment.",
             ) from exc
 
-    async def _call_claude(
+    async def _mark_analysis_failed(self, document_id: uuid.UUID, message: str) -> None:
+        document = await self.session.get(PersonDocument, document_id)
+        if document is None or document.organization_id != self.organization_id:
+            return
+
+        document.analysis_status = DocumentAnalysisStatus.FAILED.value
+        document.analysis_error = message
+        document.last_analyzed_at = datetime.now(UTC)
+        await self.session.commit()
+
+    async def _call_gemini(
         self,
         person: Person,
         document: PersonDocument,
-        text: str,
+        content: bytes,
+        text: str | None,
     ) -> dict[str, Any]:
-        client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
         prompt = (
             f"Person already entered by the employee: {person.display_name}. "
             f"Current title: {person.professional_title or 'not provided'}. "
@@ -236,31 +274,61 @@ class ProfileAIService:
             f"File: {document.original_filename}.\n\n"
             "Extract only evidence that belongs to this person. Do not treat tender "
             "requirements, other team members, or client staff as the person's own "
-            "experience.\n\nDOCUMENT TEXT:\n" + text
-        )
-        message = await client.messages.create(
-            model=self.settings.ai_model,
-            max_tokens=6000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            "experience."
         )
 
-        text_parts: list[str] = []
-        for block in message.content:
-            if getattr(block, "type", None) != "text":
-                continue
-            block_text = getattr(block, "text", None)
-            if isinstance(block_text, str):
-                text_parts.append(block_text)
+        extension = document.file_extension.lower()
+        parts: list[types.Part] = []
 
-        cleaned = "".join(text_parts).strip()
+        if extension in GEMINI_MEDIA_TYPES:
+            parts.append(
+                types.Part.from_bytes(
+                    data=content,
+                    mime_type=GEMINI_MEDIA_TYPES[extension],
+                )
+            )
+            parts.append(types.Part.from_text(text=prompt))
+        elif text is not None:
+            parts.append(
+                types.Part.from_text(
+                    text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}",
+                )
+            )
+        else:
+            raise UnsupportedAnalysisDocument(
+                f"AI extraction is not available for {extension or 'this file type'} yet."
+            )
+
+        request_content = types.Content(
+            role="user",
+            parts=parts,
+        )
+
+        async with genai.Client(api_key=self.settings.gemini_api_key).aio as client:
+            response = await client.models.generate_content(
+                model=self.settings.ai_model,
+                contents=request_content,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    max_output_tokens=6000,
+                    temperature=0.1,
+                ),
+            )
+
+        cleaned = (response.text or "").strip()
+        if not cleaned:
+            raise ValueError("Gemini returned an empty response")
+
         if cleaned.startswith("```"):
             cleaned = (
                 cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             )
+
         data = json.loads(cleaned)
         if not isinstance(data, dict):
             raise ValueError("AI response was not an object")
+
         return data
 
     def _build_suggestions(

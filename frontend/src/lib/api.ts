@@ -4,6 +4,11 @@ export const API_URL =
   import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
 
 const DEFAULT_TIMEOUT_MS = 20000;
+export const AI_ANALYSIS_TIMEOUT_MS = 120000;
+
+export type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
 
 export class ApiError extends Error {
   constructor(
@@ -70,27 +75,48 @@ async function errorFromResponse(
 
 export async function api<T>(
   path: string,
-  init: RequestInit = {},
+  init: ApiRequestInit = {},
 ): Promise<T> {
   const controller = new AbortController();
+
+  const timeoutMs =
+    init.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
   const timeoutId = window.setTimeout(
     () => controller.abort(),
-    DEFAULT_TIMEOUT_MS,
+    timeoutMs,
   );
 
   let response: Response;
 
   try {
+    const fetchInit: RequestInit = {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      mode: init.mode,
+      credentials: init.credentials,
+      cache: init.cache,
+      redirect: init.redirect,
+      referrer: init.referrer,
+      referrerPolicy: init.referrerPolicy,
+      integrity: init.integrity,
+      keepalive: init.keepalive,
+      signal: init.signal ?? controller.signal,
+    };
+
     response = await fetch(
       `${API_URL}${path}`,
       {
-        ...init,
-        headers: requestHeaders(init),
-        signal: init.signal ?? controller.signal,
+        ...fetchInit,
+        headers: requestHeaders(fetchInit),
       },
     );
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (
+      error instanceof DOMException &&
+      error.name === "AbortError"
+    ) {
       throw new ApiError(
         0,
         "The request timed out. Please try again.",

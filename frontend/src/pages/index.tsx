@@ -1,3 +1,4 @@
+
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useMutation,
@@ -41,7 +42,7 @@ import {
   PageHeader,
   TextArea,
 } from "../components/ui";
-import { API_URL, api, apiDownload } from "../lib/api";
+import { AI_ANALYSIS_TIMEOUT_MS, API_URL, api, apiDownload } from "../lib/api";
 import { session } from "../lib/session";
 import type {
   CurrentUser,
@@ -3132,7 +3133,10 @@ function DocumentsPanel({ personId }: { personId: string }) {
 
   const analyze = useMutation({
     mutationFn: (documentId: string) =>
-      api(`/people/${personId}/documents/${documentId}/analyze`, { method: "POST" }),
+      api(`/people/${personId}/documents/${documentId}/analyze`, {
+        method: "POST",
+        timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
+      }),
     onSuccess: refreshProfile,
   });
 
@@ -3187,7 +3191,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="font-serif text-2xl">Upload evidence</h2>
-            <p className="mt-1 text-sm text-slate-500">Upload CVs, degrees, certificates, reference letters and project evidence. PDF and DOCX are best for AI extraction.</p>
+            <p className="mt-1 text-sm text-slate-500">Upload CVs, degrees, certificates, reference letters and project evidence. Gemini can analyze PDFs and common image formats directly.</p>
           </div>
           <Upload className="text-evergreen" size={24} />
         </div>
@@ -3196,7 +3200,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
             Document
             <input
               type="file"
-              accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.jpg,.jpeg,.png,.txt,.rtf,.odt,.ods,.odp"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.xlsm,.csv,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.gif,.txt,.rtf,.odt,.ods,.odp"
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm"
             />
@@ -3294,6 +3298,22 @@ function DocumentsPanel({ personId }: { personId: string }) {
 export function PersonPage() {
   const { personId } =
     useParams();
+
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const archivePerson = useMutation({
+    mutationFn: () =>
+      api<void>(`/people/${personId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["people"],
+      });
+      navigate("/people");
+    },
+  });
 
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab") as CapabilityTab | null;
@@ -3437,6 +3457,31 @@ export function PersonPage() {
                 " ",
               )}
             </span>
+          </div>
+
+          <div className="mt-6">
+            <button
+              type="button"
+              disabled={archivePerson.isPending}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Archive ${person.display_name}? The record will be removed from the active directory but retained for audit history.`,
+                  )
+                ) {
+                  archivePerson.mutate();
+                }
+              }}
+              className="inline-flex items-center gap-2 rounded-xl border border-white/15 px-4 py-2.5 text-sm font-semibold text-white/70 hover:bg-red-500/15 hover:text-white disabled:opacity-50"
+            >
+              <Trash2 size={16} />
+              {archivePerson.isPending ? "Archiving…" : "Archive person"}
+            </button>
+            {archivePerson.error && (
+              <p className="mt-3 text-sm text-red-200">
+                {archivePerson.error.message}
+              </p>
+            )}
           </div>
         </div>
 
@@ -3716,6 +3761,24 @@ export function OrganizationPage() {
       },
     });
 
+  const removeMemberAccess = useMutation({
+    mutationFn: (id: string) =>
+      api<Member>(
+        `/organizations/members/${id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            is_active: false,
+          }),
+        },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["organization-members"],
+      });
+    },
+  });
+
   const memberRoles = [
     [
       "data_entry",
@@ -3993,7 +4056,7 @@ export function OrganizationPage() {
                           key={
                             member.id
                           }
-                          className="grid gap-4 p-5 md:grid-cols-[1fr_170px_130px] md:items-center"
+                          className="grid gap-4 p-5 md:grid-cols-[1fr_170px_130px_48px] md:items-center"
                         >
                           <div>
                             <p className="font-semibold">
@@ -4076,6 +4139,27 @@ export function OrganizationPage() {
                               ? "Active"
                               : "Inactive"}
                           </button>
+
+                          <button
+                            type="button"
+                            aria-label={`Remove access for ${member.full_name}`}
+                            disabled={
+                              removeMemberAccess.isPending ||
+                              !member.is_active
+                            }
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `Remove workspace access for ${member.full_name}? Their account history will be retained.`,
+                                )
+                              ) {
+                                removeMemberAccess.mutate(member.id);
+                              }
+                            }}
+                            className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <Trash2 size={17} />
+                          </button>
                         </div>
                       ),
                     )}
@@ -4097,6 +4181,12 @@ export function OrganizationPage() {
                     updateMember
                       .error.message
                   }
+                </p>
+              )}
+
+              {removeMemberAccess.error && (
+                <p className="mt-4 rounded-xl bg-red-50 p-4 text-sm text-red-700">
+                  {removeMemberAccess.error.message}
                 </p>
               )}
             </>

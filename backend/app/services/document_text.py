@@ -21,7 +21,7 @@ TEXT_EXTRACTABLE_EXTENSIONS = {
     ".pptx",
 }
 
-CLAUDE_NATIVE_EXTENSIONS = {
+GEMINI_NATIVE_EXTENSIONS = {
     ".pdf",
     ".jpg",
     ".jpeg",
@@ -31,8 +31,8 @@ CLAUDE_NATIVE_EXTENSIONS = {
 }
 
 
-def is_claude_native_document(extension: str) -> bool:
-    return extension.lower() in CLAUDE_NATIVE_EXTENSIONS
+def is_gemini_native_document(extension: str) -> bool:
+    return extension.lower() in GEMINI_NATIVE_EXTENSIONS
 
 
 def extract_text(content: bytes, extension: str, max_chars: int) -> str:
@@ -85,9 +85,9 @@ def extract_text(content: bytes, extension: str, max_chars: int) -> str:
                 if shape_text and str(shape_text).strip():
                     slide_lines.append(str(shape_text))
         text = "\n".join(slide_lines)
-    elif is_claude_native_document(extension):
+    elif is_gemini_native_document(extension):
         raise UnsupportedAnalysisDocument(
-            "This file type should be analyzed directly by Claude rather than "
+            "This file type should be analyzed directly by Gemini rather than "
             "through local text extraction."
         )
     else:

@@ -1,3 +1,4 @@
+
 [project]
 name = "capability-flow-backend"
 version = "0.1.0"
@@ -5,7 +6,7 @@ description = "Capability Flow API"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.14,<2",
-  "anthropic>=0.60,<1",
+  "google-genai>=1.0,<2",
   "beautifulsoup4>=4.13,<5",
   "boto3>=1.40,<2",
   "email-validator>=2.2,<3",
