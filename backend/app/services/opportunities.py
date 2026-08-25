@@ -33,7 +33,7 @@ from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, Opp
 from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
-from app.services.requirement_extraction import ClaudeRequirementExtractor
+from app.services.requirement_extraction import GeminiRequirementExtractor
 from app.services.source_ingestion import OpportunitySourceIngestionService
 from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer
 
@@ -302,6 +302,26 @@ class OpportunityService:
         )
         return source
 
+    @staticmethod
+    def _valid_reference_number(value: str | None) -> bool:
+        if not value:
+            return False
+        normalized = value.strip().lower().strip(" .,:;-")
+        if len(normalized) < 4:
+            return False
+        blocked = {
+            "reference",
+            "erence",
+            "ref",
+            "number",
+            "tender",
+            "rfp",
+            "solicitation",
+            "n/a",
+            "none",
+        }
+        return normalized not in blocked
+
     def _apply_source_metadata(
         self,
         opportunity: Opportunity,
@@ -316,7 +336,11 @@ class OpportunityService:
         if opportunity.title.strip().lower() in {"untitled opportunity", "new opportunity"}:
             if suggestion.title:
                 opportunity.title = suggestion.title
-        if opportunity.reference_number is None and suggestion.reference_number:
+        if (
+            opportunity.reference_number is None
+            and suggestion.reference_number
+            and self._valid_reference_number(suggestion.reference_number)
+        ):
             opportunity.reference_number = suggestion.reference_number
         if opportunity.deadline_at is None and suggestion.deadline_at:
             opportunity.deadline_at = suggestion.deadline_at
@@ -464,13 +488,14 @@ class OpportunityService:
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "Add a readable source before analysis",
                 )
+        extractor = GeminiRequirementExtractor()
         version = await self.repo.next_analysis_version(opportunity_id)
         analysis = OpportunityAnalysis(
             organization_id=self.organization_id,
             opportunity_id=opportunity_id,
             version=version,
             status=AnalysisStatus.ANALYZING,
-            model_name=self.settings.anthropic_model,
+            model_name=extractor.model_name,
             started_at=datetime.now(UTC),
             source_snapshot=source_text,
             created_by_user_id=self.user_id,
@@ -481,8 +506,32 @@ class OpportunityService:
         await self.session.commit()
         await self.session.refresh(analysis)
         try:
-            extracted = await ClaudeRequirementExtractor().extract(source_text)
+            extracted = await extractor.extract(source_text)
             await self._persist_extracted(opportunity, analysis, extracted)
+
+            mandatory_without_requirements = any(
+                role.is_mandatory and not role.requirements for role in extracted.roles
+            )
+            has_assessable_requirements = any(role.requirements for role in extracted.roles)
+
+            if (
+                not extracted.roles
+                or not has_assessable_requirements
+                or mandatory_without_requirements
+            ):
+                analysis.status = AnalysisStatus.NEEDS_REVIEW
+                analysis.readiness_score = None
+                analysis.completed_at = datetime.now(UTC)
+                analysis.error_message = (
+                    "The source was read successfully, but it does not contain enough explicit "
+                    "role and qualification information for reliable capability matching."
+                )
+                if not workflow_locked:
+                    opportunity.status = OpportunityStatus.NEEDS_REVIEW
+                await self.session.commit()
+                await self.session.refresh(analysis)
+                return analysis
+
             analysis.status = AnalysisStatus.MATCHING
             await self.session.commit()
             await self._run_matching(opportunity, analysis)
@@ -516,8 +565,11 @@ class OpportunityService:
             opportunity.title = extracted.title
         if extracted.client_name and not opportunity.client_name:
             opportunity.client_name = extracted.client_name
-        if extracted.reference_number and not opportunity.reference_number:
-            opportunity.reference_number = extracted.reference_number
+        if not self._valid_reference_number(opportunity.reference_number):
+            opportunity.reference_number = None
+        if extracted.reference_number and self._valid_reference_number(extracted.reference_number):
+            if not opportunity.reference_number:
+                opportunity.reference_number = extracted.reference_number
         if extracted.deadline_at and not opportunity.deadline_at:
             opportunity.deadline_at = extracted.deadline_at
         for index, role_data in enumerate(extracted.roles):

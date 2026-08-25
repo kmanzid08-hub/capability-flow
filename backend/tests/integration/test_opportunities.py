@@ -152,7 +152,7 @@ async def test_ai_extraction_matching_and_team_generation(client: AsyncClient) -
         }
     )
     with patch(
-        "app.services.opportunities.ClaudeRequirementExtractor.extract",
+        "app.services.opportunities.GeminiRequirementExtractor.extract",
         new=AsyncMock(return_value=extracted),
     ):
         analyzed = await client.post(

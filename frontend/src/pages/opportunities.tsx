@@ -1,3 +1,4 @@
+
 import {
     AlertTriangle,
     ArrowLeft,
@@ -42,7 +43,7 @@ import {
     PageHeader,
     TextArea,
 } from "../components/ui";
-import { api, apiDownload } from "../lib/api";
+import { OPPORTUNITY_ANALYSIS_TIMEOUT_MS, api, apiDownload } from "../lib/api";
 import type {
     CandidateMatch,
     CapabilityGap,
@@ -195,10 +196,10 @@ function ScoreRing({
     score: number | null | undefined;
     label: string;
 }) {
-    const normalized = Math.max(
-        0,
-        Math.min(100, score ?? 0),
-    );
+    const hasScore = score != null;
+    const normalized = hasScore
+        ? Math.max(0, Math.min(100, score))
+        : 0;
 
     return (
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -208,7 +209,7 @@ function ScoreRing({
 
             <div className="mt-4 flex items-end gap-2">
                 <strong className="font-serif text-4xl text-evergreen">
-                    {Math.round(normalized)}
+                    {hasScore ? Math.round(normalized) : "—"}
                 </strong>
                 <span className="pb-1 text-sm text-slate-400">
                     / 100
@@ -307,6 +308,13 @@ function IntakeForm({
                 }
 
                 void source;
+                await api<OpportunityAnalysis>(
+                    `/opportunities/${opportunityId}/analyze`,
+                    {
+                        method: "POST",
+                        timeoutMs: OPPORTUNITY_ANALYSIS_TIMEOUT_MS,
+                    },
+                );
                 return api<Opportunity>(`/opportunities/${opportunityId}`);
             }
 
@@ -345,7 +353,15 @@ function IntakeForm({
                 );
             }
 
-            return intake.opportunity;
+            await api<OpportunityAnalysis>(
+                `/opportunities/${intake.opportunity.id}/analyze`,
+                {
+                    method: "POST",
+                    timeoutMs: OPPORTUNITY_ANALYSIS_TIMEOUT_MS,
+                },
+            );
+
+            return api<Opportunity>(`/opportunities/${intake.opportunity.id}`);
         },
 
         onSuccess: (opportunity) => {
@@ -371,6 +387,15 @@ function IntakeForm({
                     "opportunity-sources",
                     opportunity.id,
                 ],
+            });
+            queryClient.invalidateQueries({
+                queryKey: ["opportunity-roles", opportunity.id],
+            });
+            queryClient.invalidateQueries({
+                queryKey: ["opportunity-teams", opportunity.id],
+            });
+            queryClient.invalidateQueries({
+                queryKey: ["opportunity-gaps", opportunity.id],
             });
 
             onComplete?.(opportunity);
@@ -1155,9 +1180,13 @@ function RoleWorkspace({
 function RecommendedTeams({
     opportunityId,
     selectedTeamId,
+    analysisStatus,
+    rolesCount,
 }: {
     opportunityId: string;
     selectedTeamId: string | null;
+    analysisStatus: string | undefined;
+    rolesCount: number;
 }) {
     const queryClient = useQueryClient();
 
@@ -1190,7 +1219,17 @@ function RecommendedTeams({
             api<RecommendedTeam[]>(
                 `/opportunities/${opportunityId}/teams`,
             ),
+        enabled: analysisStatus === "complete" && rolesCount > 0,
     });
+
+    if (analysisStatus !== "complete" || rolesCount === 0) {
+        return (
+            <EmptyState
+                title="Team recommendation not yet assessable"
+                text="Capability Flow needs confirmed role requirements before it can construct and rank an internal team."
+            />
+        );
+    }
 
     if (query.isLoading) {
         return (
@@ -1355,8 +1394,12 @@ function RecommendedTeams({
 
 function GapsPanel({
     opportunityId,
+    analysisStatus,
+    rolesCount,
 }: {
     opportunityId: string;
+    analysisStatus: string | undefined;
+    rolesCount: number;
 }) {
     const query = useQuery({
         queryKey: [
@@ -1367,7 +1410,17 @@ function GapsPanel({
             api<CapabilityGap[]>(
                 `/opportunities/${opportunityId}/gaps`,
             ),
+        enabled: analysisStatus === "complete" && rolesCount > 0,
     });
+
+    if (analysisStatus !== "complete" || rolesCount === 0) {
+        return (
+            <EmptyState
+                title="Capability gaps not yet assessable"
+                text="Role and qualification requirements must be identified before Capability Flow can determine whether the firm has a genuine capability gap."
+            />
+        );
+    }
 
     if (query.isLoading) {
         return (
@@ -1654,8 +1707,9 @@ export function OpportunityPage() {
         enabled:
             Boolean(
                 opportunityId &&
-                analysisQuery.data?.status ===
-                "complete",
+                ["complete", "needs_review"].includes(
+                    analysisQuery.data?.status ?? "",
+                ),
             ),
     });
 
@@ -1739,6 +1793,7 @@ export function OpportunityPage() {
                     `/opportunities/${opportunityId}/analyze`,
                     {
                         method: "POST",
+                        timeoutMs: OPPORTUNITY_ANALYSIS_TIMEOUT_MS,
                     },
                 ),
 
@@ -2096,6 +2151,17 @@ export function OpportunityPage() {
                                 </div>
                             ) : analysis ? (
                                 <>
+                                    {analysis.status === "needs_review" && (
+                                        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                                            <p className="font-semibold text-amber-900">
+                                                Requirements need review
+                                            </p>
+                                            <p className="mt-2 text-sm leading-6 text-amber-800">
+                                                {analysis.error_message ||
+                                                    "The source was read, but there is not enough explicit role and qualification information for reliable matching."}
+                                            </p>
+                                        </div>
+                                    )}
                                     <div className="mt-6 grid gap-4 sm:grid-cols-3">
                                         <ScoreRing
                                             score={
@@ -2275,8 +2341,8 @@ export function OpportunityPage() {
                             </div>
                         ) : (
                             <EmptyState
-                                title="No roles extracted"
-                                text="The current analysis did not identify explicit team roles. Add more complete source material and re-analyze."
+                                title="Roles could not be identified reliably"
+                                text="The source was read, but it did not provide enough explicit staffing information for reliable role matching. Add the TOR, RFP, staffing section, or other detailed requirement and re-analyze."
                             />
                         )}
                     </>
@@ -2290,6 +2356,8 @@ export function OpportunityPage() {
                         selectedTeamId={
                             opportunity.selected_team_id
                         }
+                        analysisStatus={analysis?.status}
+                        rolesCount={roles.length}
                     />
                 )}
 
@@ -2298,6 +2366,8 @@ export function OpportunityPage() {
                         opportunityId={
                             opportunityId
                         }
+                        analysisStatus={analysis?.status}
+                        rolesCount={roles.length}
                     />
                 )}
 

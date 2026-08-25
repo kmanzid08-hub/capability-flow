@@ -1,9 +1,10 @@
 import json
-from typing import Any
 
-import httpx
+from google import genai
+from google.genai import types
 from pydantic import ValidationError
 
+from app.core.config import get_settings
 from app.core.opportunity_config import get_opportunity_intelligence_settings
 from app.schemas.opportunity import ExtractedOpportunity
 
@@ -13,150 +14,100 @@ class RequirementExtractionError(RuntimeError):
 
 
 SYSTEM_INSTRUCTIONS = """
-You extract procurement, tender, TOR, RFP, staffing and job requirements for Capability Flow.
-Never invent qualifications that are not supported by the source.
-Separate required team roles from team-level constraints.
-Preserve mandatory vs preferred wording.
-Normalize common skill, certification and degree names while keeping a human-readable label.
+You extract procurement, tender, TOR, RFP, staffing and consulting requirements for
+Capability Flow.
 
-For a role requirement use requirement_type values only from:
-skill, education, certification, experience, project_experience, sector, geography, language,
-availability, client_experience, document, custom.
+Return only information supported by the source. Never invent qualifications, dates,
+clients, reference numbers, staffing roles, certifications or experience requirements.
+
+Identify both explicitly named roles and unmistakably requested individual roles. For
+example, if the source clearly says it is recruiting one consultant to conduct an
+evaluation, create an appropriate consultant/evaluator role. Do not create a role merely
+because a document discusses staff generally.
+
+Separate role-level requirements from team-level constraints. Preserve mandatory versus
+preferred wording. Normalize common skill, certification and degree names while keeping
+a human-readable label.
+
+For a role requirement, requirement_type must be one of:
+skill, education, certification, experience, project_experience, sector, geography,
+language, availability, client_experience, document, custom.
 
 importance must be mandatory, preferred, or informational.
 For education, set minimum_degree_level when stated.
-For experience/project experience, set minimum_years or minimum_count when stated.
-For one-of alternatives, put normalized alternatives in values and operator='one_of'.
+For experience and project experience, set minimum_years or minimum_count when stated.
+For one-of alternatives, put normalized alternatives in values and use operator='one_of'.
 For normal text matches use operator='match'.
 Use weight 3 for mandatory, 1 for preferred, and 0.25 for informational unless the source
-clearly implies otherwise.
-Include short source_excerpt strings supporting each extracted requirement.
+clearly supports a different relative importance.
+Include a short source_excerpt supporting each extracted requirement.
 
-Use the extract_opportunity tool exactly once with the complete structured result.
+Metadata rules:
+- title is the opportunity or assignment title, not an email salutation or sender name.
+- client_name is the procuring/recruiting organization when clearly identified.
+- reference_number must be an actual tender/RFP/reference identifier. Never return words
+  such as 'reference', 'ref', 'number', 'tender', or fragments of those words.
+- deadline_at must only be returned when a submission/application deadline is stated.
+
+If no assessable human role can be identified, return roles as an empty list.
 """.strip()
 
 
-class ClaudeRequirementExtractor:
+class GeminiRequirementExtractor:
     def __init__(self) -> None:
-        self.settings = get_opportunity_intelligence_settings()
+        self.app_settings = get_settings()
+        self.opportunity_settings = get_opportunity_intelligence_settings()
 
-        if not self.settings.anthropic_api_key:
+        if not self.app_settings.gemini_api_key:
             raise RequirementExtractionError(
-                "ANTHROPIC_API_KEY is required for automatic requirement extraction"
+                "GEMINI_API_KEY is required for automatic opportunity analysis"
             )
+
+    @property
+    def model_name(self) -> str:
+        return self.app_settings.ai_model
 
     async def extract(self, source_text: str) -> ExtractedOpportunity:
+        source_text = source_text[: self.opportunity_settings.opportunity_max_source_characters]
         schema = ExtractedOpportunity.model_json_schema()
 
-        payload: dict[str, Any] = {
-            "model": self.settings.anthropic_model,
-            "max_tokens": self.settings.anthropic_max_tokens,
-            "temperature": 0,
-            "system": SYSTEM_INSTRUCTIONS,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "Analyze the following client opportunity. "
-                        "Use the extract_opportunity tool with the complete result.\n\n"
-                        f"SOURCE:\n{source_text}"
-                    ),
-                }
-            ],
-            "tools": [
-                {
-                    "name": "extract_opportunity",
-                    "description": (
-                        "Return the normalized opportunity, roles, requirements, "
-                        "and team-level constraints extracted from the client source."
-                    ),
-                    "input_schema": schema,
-                }
-            ],
-            "tool_choice": {
-                "type": "tool",
-                "name": "extract_opportunity",
-            },
-        }
-
-        api_key = self.settings.anthropic_api_key
-        if not api_key:
-            raise RequirementExtractionError(
-                "ANTHROPIC_API_KEY is required for automatic requirement extraction"
-            )
-
-        headers: dict[str, str] = {
-            "x-api-key": api_key,
-            "anthropic-version": self.settings.anthropic_version,
-            "content-type": "application/json",
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    self.settings.anthropic_api_url,
-                    headers=headers,
-                    json=payload,
+        request_content = types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(
+                    text=(
+                        "Analyze the client opportunity below and return the complete "
+                        "structured result.\n\nSOURCE:\n"
+                        f"{source_text}"
+                    )
                 )
-        except httpx.HTTPError as exc:
-            raise RequirementExtractionError(f"Claude API request failed: {exc}") from exc
-
-        if response.is_error:
-            detail = self._api_error_detail(response)
-            raise RequirementExtractionError(
-                f"Claude API returned HTTP {response.status_code}: {detail}"
-            )
-
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise RequirementExtractionError(
-                "Claude API returned an invalid JSON response"
-            ) from exc
-
-        tool_input = self._extract_tool_input(body)
-
-        try:
-            return ExtractedOpportunity.model_validate(tool_input)
-        except (ValidationError, ValueError, TypeError) as exc:
-            raise RequirementExtractionError(
-                f"Claude extraction returned invalid structured data: {exc}"
-            ) from exc
-
-    @staticmethod
-    def _extract_tool_input(body: dict[str, Any]) -> dict[str, Any]:
-        content = body.get("content")
-
-        if not isinstance(content, list):
-            raise RequirementExtractionError("Claude API response did not contain content blocks")
-
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-
-            if block.get("type") == "tool_use" and block.get("name") == "extract_opportunity":
-                tool_input = block.get("input")
-
-                if isinstance(tool_input, dict):
-                    return tool_input
-
-        raise RequirementExtractionError(
-            "Claude did not return the required extract_opportunity tool result"
+            ],
         )
 
-    @staticmethod
-    def _api_error_detail(response: httpx.Response) -> str:
         try:
-            payload = response.json()
-        except ValueError:
-            return response.text[:500] or "Unknown Anthropic API error"
+            async with genai.Client(api_key=self.app_settings.gemini_api_key).aio as client:
+                response = await client.models.generate_content(
+                    model=self.model_name,
+                    contents=request_content,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTIONS,
+                        response_mime_type="application/json",
+                        response_json_schema=schema,
+                        max_output_tokens=8192,
+                        temperature=0.1,
+                    ),
+                )
+        except Exception as exc:
+            raise RequirementExtractionError(f"Gemini analysis failed: {exc}") from exc
 
-        error = payload.get("error")
+        payload = (response.text or "").strip()
+        if not payload:
+            raise RequirementExtractionError("Gemini returned an empty opportunity analysis")
 
-        if isinstance(error, dict):
-            message = error.get("message")
-
-            if isinstance(message, str):
-                return message
-
-        return json.dumps(payload)[:500]
+        try:
+            data = json.loads(payload)
+            return ExtractedOpportunity.model_validate(data)
+        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+            raise RequirementExtractionError(
+                "Gemini returned an opportunity analysis that could not be validated"
+            ) from exc

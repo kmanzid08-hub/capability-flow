@@ -1,3 +1,4 @@
+
 import { session } from "./session";
 
 export const API_URL =
@@ -6,6 +7,7 @@ export const API_URL =
 const DEFAULT_TIMEOUT_MS = 20000;
 export const AUTH_TIMEOUT_MS = 60000;
 export const AI_ANALYSIS_TIMEOUT_MS = 120000;
+export const OPPORTUNITY_ANALYSIS_TIMEOUT_MS = 180000;
 
 export type ApiRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -56,6 +58,10 @@ function timeoutForPath(
     path === "/auth/register-organization"
   ) {
     return AUTH_TIMEOUT_MS;
+  }
+
+  if (path.startsWith("/opportunities/") && path.endsWith("/analyze")) {
+    return OPPORTUNITY_ANALYSIS_TIMEOUT_MS;
   }
 
   return DEFAULT_TIMEOUT_MS;
