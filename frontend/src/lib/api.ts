@@ -4,6 +4,7 @@ export const API_URL =
   import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
 
 const DEFAULT_TIMEOUT_MS = 20000;
+export const AUTH_TIMEOUT_MS = 60000;
 export const AI_ANALYSIS_TIMEOUT_MS = 120000;
 
 export type ApiRequestInit = RequestInit & {
@@ -20,50 +21,52 @@ export class ApiError extends Error {
   }
 }
 
-function requestHeaders(
-  init: RequestInit,
-): Headers {
+function requestHeaders(init: RequestInit): Headers {
   const headers = new Headers(init.headers);
 
-  if (
-    init.body &&
-    !(init.body instanceof FormData)
-  ) {
-    headers.set(
-      "Content-Type",
-      "application/json",
-    );
+  if (init.body && !(init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
   }
 
   const token = session.token();
   const organization = session.organization();
 
   if (token) {
-    headers.set(
-      "Authorization",
-      `Bearer ${token}`,
-    );
+    headers.set("Authorization", `Bearer ${token}`);
   }
 
   if (organization) {
-    headers.set(
-      "X-Organization-ID",
-      organization,
-    );
+    headers.set("X-Organization-ID", organization);
   }
 
   return headers;
 }
 
+function timeoutForPath(
+  path: string,
+  requestedTimeout?: number,
+): number {
+  if (requestedTimeout !== undefined) {
+    return requestedTimeout;
+  }
+
+  if (
+    path === "/auth/login" ||
+    path === "/auth/me" ||
+    path === "/auth/register-organization"
+  ) {
+    return AUTH_TIMEOUT_MS;
+  }
+
+  return DEFAULT_TIMEOUT_MS;
+}
+
 async function errorFromResponse(
   response: Response,
 ): Promise<ApiError> {
-  const body = await response
-    .json()
-    .catch(() => ({
-      detail:
-        "The request could not be completed",
-    }));
+  const body = await response.json().catch(() => ({
+    detail: "The request could not be completed",
+  }));
 
   return new ApiError(
     response.status,
@@ -78,10 +81,7 @@ export async function api<T>(
   init: ApiRequestInit = {},
 ): Promise<T> {
   const controller = new AbortController();
-
-  const timeoutMs =
-    init.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
+  const timeoutMs = timeoutForPath(path, init.timeoutMs);
   const timeoutId = window.setTimeout(
     () => controller.abort(),
     timeoutMs,
@@ -105,13 +105,10 @@ export async function api<T>(
       signal: init.signal ?? controller.signal,
     };
 
-    response = await fetch(
-      `${API_URL}${path}`,
-      {
-        ...fetchInit,
-        headers: requestHeaders(fetchInit),
-      },
-    );
+    response = await fetch(`${API_URL}${path}`, {
+      ...fetchInit,
+      headers: requestHeaders(fetchInit),
+    });
   } catch (error) {
     if (
       error instanceof DOMException &&
@@ -134,9 +131,7 @@ export async function api<T>(
   }
 
   if (!response.ok) {
-    throw await errorFromResponse(
-      response,
-    );
+    throw await errorFromResponse(response);
   }
 
   if (response.status === 204) {
@@ -150,26 +145,17 @@ export async function apiDownload(
   path: string,
   filename: string,
 ): Promise<void> {
-  const response = await fetch(
-    `${API_URL}${path}`,
-    {
-      headers: requestHeaders({}),
-    },
-  );
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: requestHeaders({}),
+  });
 
   if (!response.ok) {
-    throw await errorFromResponse(
-      response,
-    );
+    throw await errorFromResponse(response);
   }
 
   const blob = await response.blob();
-
-  const objectUrl =
-    window.URL.createObjectURL(blob);
-
-  const anchor =
-    document.createElement("a");
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
 
   anchor.href = objectUrl;
   anchor.download = filename;
@@ -178,7 +164,5 @@ export async function apiDownload(
   anchor.click();
   anchor.remove();
 
-  window.URL.revokeObjectURL(
-    objectUrl,
-  );
+  window.URL.revokeObjectURL(objectUrl);
 }
