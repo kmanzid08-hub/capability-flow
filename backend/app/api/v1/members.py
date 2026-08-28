@@ -94,23 +94,40 @@ async def create_member(
             func.lower(User.email) == email,
         )
     )
-    if existing_user is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "A user with this email already exists. "
-                "Use a different email or contact the workspace owner."
-            ),
+
+    if existing_user is None:
+        user = User(
+            email=email,
+            full_name=data.full_name.strip(),
+            password_hash=PASSWORD_HASH.hash(data.password),
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()
+    else:
+        user = existing_user
+
+        existing_membership = await session.scalar(
+            select(OrganizationMembership)
+            .options(joinedload(OrganizationMembership.user))
+            .where(
+                OrganizationMembership.organization_id == membership.organization_id,
+                OrganizationMembership.user_id == user.id,
+            )
         )
 
-    user = User(
-        email=email,
-        full_name=data.full_name.strip(),
-        password_hash=PASSWORD_HASH.hash(data.password),
-        is_active=True,
-    )
-    session.add(user)
-    await session.flush()
+        if existing_membership is not None:
+            if existing_membership.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This user already belongs to the workspace",
+                )
+
+            existing_membership.is_active = True
+            existing_membership.role = data.role
+            await session.commit()
+            await session.refresh(existing_membership)
+            return response_for(existing_membership)
 
     new_membership = OrganizationMembership(
         organization_id=membership.organization_id,
@@ -119,7 +136,6 @@ async def create_member(
         is_active=True,
     )
     session.add(new_membership)
-
     await session.commit()
 
     created = await session.scalar(
@@ -166,7 +182,7 @@ async def update_member(
         )
 
     removing_owner = target.role == MembershipRole.OWNER and (
-        data.role is not None and data.role != MembershipRole.OWNER or data.is_active is False
+        (data.role is not None and data.role != MembershipRole.OWNER) or data.is_active is False
     )
 
     if removing_owner:
