@@ -1,4 +1,3 @@
-
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useMutation,
@@ -3086,13 +3085,175 @@ const documentTypeOptions: { value: DocumentType; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
+type SuggestionFieldKind =
+  | "text"
+  | "number"
+  | "date"
+  | "textarea"
+  | "select"
+  | "checkbox";
+
+type SuggestionField = {
+  key: string;
+  label: string;
+  kind?: SuggestionFieldKind;
+  options?: { value: string; label: string }[];
+  placeholder?: string;
+};
+
+const suggestionFields: Record<ProfileSuggestion["category"], SuggestionField[]> = {
+  profile: [
+    { key: "professional_title", label: "Professional title" },
+    { key: "summary", label: "Professional summary", kind: "textarea" },
+    { key: "nationality", label: "Nationality" },
+    { key: "country_of_residence", label: "Country of residence" },
+  ],
+  skill: [
+    { key: "name", label: "Skill" },
+    {
+      key: "proficiency",
+      label: "Proficiency",
+      kind: "select",
+      options: [
+        { value: "", label: "Not specified" },
+        { value: "beginner", label: "Beginner" },
+        { value: "intermediate", label: "Intermediate" },
+        { value: "advanced", label: "Advanced" },
+        { value: "expert", label: "Expert" },
+      ],
+    },
+    { key: "years_experience", label: "Years of experience", kind: "number" },
+    { key: "last_used_year", label: "Last used year", kind: "number" },
+    { key: "notes", label: "Notes", kind: "textarea" },
+  ],
+  education: [
+    {
+      key: "degree_level",
+      label: "Degree level",
+      kind: "select",
+      options: [
+        { value: "secondary", label: "Secondary" },
+        { value: "certificate", label: "Certificate" },
+        { value: "diploma", label: "Diploma" },
+        { value: "associate", label: "Associate" },
+        { value: "bachelor", label: "Bachelor" },
+        { value: "master", label: "Master" },
+        { value: "doctorate", label: "Doctorate" },
+        { value: "professional", label: "Professional" },
+        { value: "other", label: "Other" },
+      ],
+    },
+    { key: "degree_name", label: "Degree name" },
+    { key: "field_of_study", label: "Field of study" },
+    { key: "institution", label: "Institution" },
+    { key: "country", label: "Country" },
+    { key: "start_year", label: "Start year", kind: "number" },
+    { key: "graduation_year", label: "Graduation year", kind: "number" },
+    { key: "notes", label: "Notes", kind: "textarea" },
+  ],
+  certification: [
+    { key: "name", label: "Certification" },
+    { key: "issuer", label: "Issuer" },
+    { key: "credential_id", label: "Credential ID" },
+    { key: "issue_date", label: "Issue date", kind: "date" },
+    { key: "expiry_date", label: "Expiry date", kind: "date" },
+    { key: "verification_url", label: "Verification URL" },
+    { key: "notes", label: "Notes", kind: "textarea" },
+  ],
+  employment: [
+    { key: "employer_name", label: "Employer" },
+    { key: "job_title", label: "Job title" },
+    {
+      key: "employment_type",
+      label: "Employment type",
+      kind: "select",
+      options: [
+        { value: "", label: "Not specified" },
+        { value: "full_time", label: "Full time" },
+        { value: "part_time", label: "Part time" },
+        { value: "contract", label: "Contract" },
+        { value: "consulting", label: "Consulting" },
+        { value: "temporary", label: "Temporary" },
+        { value: "internship", label: "Internship" },
+        { value: "volunteer", label: "Volunteer" },
+        { value: "other", label: "Other" },
+      ],
+    },
+    { key: "industry", label: "Industry / sector" },
+    { key: "location", label: "Location" },
+    { key: "country", label: "Country" },
+    { key: "start_date", label: "Start date", kind: "date" },
+    { key: "end_date", label: "End date", kind: "date" },
+    { key: "is_current", label: "Current employment", kind: "checkbox" },
+    { key: "description", label: "Role description", kind: "textarea" },
+    { key: "responsibilities", label: "Responsibilities", kind: "textarea" },
+    { key: "achievements", label: "Achievements", kind: "textarea" },
+  ],
+  project: [
+    { key: "project_name", label: "Project name" },
+    { key: "client_name", label: "Client" },
+    { key: "role", label: "Role" },
+    { key: "sector", label: "Sector" },
+    { key: "location", label: "Location" },
+    { key: "country", label: "Country" },
+    { key: "start_date", label: "Start date", kind: "date" },
+    { key: "end_date", label: "End date", kind: "date" },
+    { key: "is_current", label: "Ongoing project", kind: "checkbox" },
+    { key: "description", label: "Project description", kind: "textarea" },
+    { key: "responsibilities", label: "Responsibilities", kind: "textarea" },
+    { key: "outcomes", label: "Outcomes", kind: "textarea" },
+    { key: "skills_summary", label: "Skills used", kind: "textarea" },
+  ],
+};
+
+function readableSuggestionValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "Not recorded";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  return String(value).replaceAll("_", " ");
+}
+
+function normalizeSuggestionPayload(
+  category: ProfileSuggestion["category"],
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const numericFields = new Set([
+    "years_experience",
+    "last_used_year",
+    "start_year",
+    "graduation_year",
+  ]);
+  const result: Record<string, unknown> = {};
+
+  for (const field of suggestionFields[category]) {
+    const value = values[field.key];
+    if (field.kind === "checkbox") {
+      result[field.key] = Boolean(value);
+    } else if (numericFields.has(field.key)) {
+      result[field.key] =
+        value === "" || value === null || value === undefined
+          ? null
+          : Number(value);
+    } else {
+      result[field.key] = value === "" || value === undefined ? null : value;
+    }
+  }
+
+  return result;
+}
+
 function DocumentsPanel({ personId }: { personId: string }) {
   const queryClient = useQueryClient();
   const [file, setFile] = React.useState<File | null>(null);
   const [documentType, setDocumentType] = React.useState<DocumentType>("cv");
   const [title, setTitle] = React.useState("");
   const [uploadError, setUploadError] = React.useState<string | null>(null);
-  const [editing, setEditing] = React.useState<Record<string, string> | null>(null);
+  const [editingId, setEditingId] = React.useState<string | null>(null);
+  const [editPayload, setEditPayload] = React.useState<Record<string, unknown>>({});
+  const [reviewNotes, setReviewNotes] = React.useState<Record<string, string>>({});
 
   const documents = useQuery({
     queryKey: ["documents", personId],
@@ -3100,7 +3261,8 @@ function DocumentsPanel({ personId }: { personId: string }) {
   });
   const suggestions = useQuery({
     queryKey: ["profile-suggestions", personId],
-    queryFn: () => api<ProfileSuggestion[]>(`/people/${personId}/ai-suggestions?status=pending`),
+    queryFn: () =>
+      api<ProfileSuggestion[]>(`/people/${personId}/ai-suggestions?status=pending`),
   });
   const completeness = useQuery({
     queryKey: ["profile-completeness", personId],
@@ -3108,7 +3270,17 @@ function DocumentsPanel({ personId }: { personId: string }) {
   });
 
   const refreshProfile = () => {
-    for (const key of ["documents", "profile-suggestions", "profile-completeness", "person", "skills", "education", "certifications", "employment", "projects"]) {
+    for (const key of [
+      "documents",
+      "profile-suggestions",
+      "profile-completeness",
+      "person",
+      "skills",
+      "education",
+      "certifications",
+      "employment",
+      "projects",
+    ]) {
       queryClient.invalidateQueries({ queryKey: [key, personId] });
     }
   };
@@ -3121,14 +3293,18 @@ function DocumentsPanel({ personId }: { personId: string }) {
       form.append("file", file);
       form.append("document_type", documentType);
       if (title.trim()) form.append("title", title.trim());
-      return api<PersonDocument>(`/people/${personId}/documents`, { method: "POST", body: form });
+      return api<PersonDocument>(`/people/${personId}/documents`, {
+        method: "POST",
+        body: form,
+      });
     },
     onSuccess: () => {
       setFile(null);
       setTitle("");
       refreshProfile();
     },
-    onError: (error) => setUploadError(error instanceof Error ? error.message : "Upload failed."),
+    onError: (error) =>
+      setUploadError(error instanceof Error ? error.message : "Upload failed."),
   });
 
   const analyze = useMutation({
@@ -3141,26 +3317,58 @@ function DocumentsPanel({ personId }: { personId: string }) {
   });
 
   const accept = useMutation({
-    mutationFn: (suggestionId: string) =>
-      api(`/people/${personId}/ai-suggestions/${suggestionId}/accept`, { method: "POST" }),
-    onSuccess: refreshProfile,
+    mutationFn: async (suggestion: ProfileSuggestion) => {
+      const note = reviewNotes[suggestion.id]?.trim();
+      if (note) {
+        await api(`/people/${personId}/ai-suggestions/${suggestion.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ review_note: note }),
+        });
+      }
+      return api(`/people/${personId}/ai-suggestions/${suggestion.id}/accept`, {
+        method: "POST",
+      });
+    },
+    onSuccess: () => {
+      setEditingId(null);
+      refreshProfile();
+    },
   });
 
   const reject = useMutation({
-    mutationFn: (suggestionId: string) =>
-      api(`/people/${personId}/ai-suggestions/${suggestionId}/reject`, { method: "POST" }),
+    mutationFn: async (suggestion: ProfileSuggestion) => {
+      const note = reviewNotes[suggestion.id]?.trim();
+      if (note) {
+        await api(`/people/${personId}/ai-suggestions/${suggestion.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ review_note: note }),
+        });
+      }
+      return api(`/people/${personId}/ai-suggestions/${suggestion.id}/reject`, {
+        method: "POST",
+      });
+    },
     onSuccess: refreshProfile,
   });
 
-  const saveEdit = useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: Record<string, unknown> }) =>
-      api(`/people/${personId}/ai-suggestions/${id}`, {
+  const acceptEdited = useMutation({
+    mutationFn: async (suggestion: ProfileSuggestion) => {
+      const payload = normalizeSuggestionPayload(suggestion.category, editPayload);
+      const reviewNote = reviewNotes[suggestion.id]?.trim() || null;
+
+      await api(`/people/${personId}/ai-suggestions/${suggestion.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ payload }),
-      }),
+        body: JSON.stringify({ payload, review_note: reviewNote }),
+      });
+
+      return api(`/people/${personId}/ai-suggestions/${suggestion.id}/accept`, {
+        method: "POST",
+      });
+    },
     onSuccess: () => {
-      setEditing(null);
-      queryClient.invalidateQueries({ queryKey: ["profile-suggestions", personId] });
+      setEditingId(null);
+      setEditPayload({});
+      refreshProfile();
     },
   });
 
@@ -3171,19 +3379,41 @@ function DocumentsPanel({ personId }: { personId: string }) {
   });
 
   const pendingCount = suggestions.data?.length ?? 0;
+  const documentById = new Map((documents.data ?? []).map((item) => [item.id, item]));
+  const reviewBusy = accept.isPending || reject.isPending || acceptEdited.isPending;
+
+  const startEditing = (suggestion: ProfileSuggestion) => {
+    setEditingId(suggestion.id);
+    setEditPayload({ ...suggestion.payload });
+  };
+
+  const updateEditValue = (key: string, value: unknown) => {
+    setEditPayload((current) => ({ ...current, [key]: value }));
+  };
 
   return (
     <div className="grid gap-6">
       <section className="grid gap-4 rounded-2xl bg-evergreen p-6 text-white md:grid-cols-2">
         <div>
-          <p className="text-xs font-bold uppercase tracking-[.18em] text-mint">Profile readiness</p>
-          <p className="mt-2 font-serif text-3xl">{completeness.data?.profile_percent ?? 0}% complete</p>
-          <p className="mt-2 text-sm text-white/65">AI helps populate the profile, but a teammate must approve every extracted fact.</p>
+          <p className="text-xs font-bold uppercase tracking-[.18em] text-mint">
+            Profile readiness
+          </p>
+          <p className="mt-2 font-serif text-3xl">
+            {completeness.data?.profile_percent ?? 0}% complete
+          </p>
+          <p className="mt-2 text-sm text-white/65">
+            Gemini can propose profile facts, but nothing becomes verified profile data
+            until a teammate reviews and accepts it.
+          </p>
         </div>
         <div className="rounded-xl bg-white/10 p-4">
           <p className="text-sm text-white/60">Evidence-backed structured records</p>
-          <p className="mt-1 text-2xl font-semibold">{completeness.data?.evidence_percent ?? 0}%</p>
-          <p className="mt-3 text-xs text-white/50">{pendingCount} AI suggestion{pendingCount === 1 ? "" : "s"} awaiting review</p>
+          <p className="mt-1 text-2xl font-semibold">
+            {completeness.data?.evidence_percent ?? 0}%
+          </p>
+          <p className="mt-3 text-xs text-white/50">
+            {pendingCount} AI suggestion{pendingCount === 1 ? "" : "s"} awaiting review
+          </p>
         </div>
       </section>
 
@@ -3191,7 +3421,10 @@ function DocumentsPanel({ personId }: { personId: string }) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="font-serif text-2xl">Upload evidence</h2>
-            <p className="mt-1 text-sm text-slate-500">Upload CVs, degrees, certificates, reference letters and project evidence. Gemini can analyze PDFs and common image formats directly.</p>
+            <p className="mt-1 text-sm text-slate-500">
+              Upload CVs, degrees, certificates, reference letters and project evidence.
+              Gemini can analyze PDFs and common image formats directly.
+            </p>
           </div>
           <Upload className="text-evergreen" size={24} />
         </div>
@@ -3207,15 +3440,36 @@ function DocumentsPanel({ personId }: { personId: string }) {
           </label>
           <label className="text-sm font-medium text-slate-700">
             Type
-            <select value={documentType} onChange={(event) => setDocumentType(event.target.value as DocumentType)} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3">
-              {documentTypeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            <select
+              value={documentType}
+              onChange={(event) => setDocumentType(event.target.value as DocumentType)}
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3"
+            >
+              {documentTypeOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
           </label>
-          <Field label="Title (optional)" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Defaults to the filename" />
+          <Field
+            label="Title (optional)"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Defaults to the filename"
+          />
         </div>
-        {(uploadError || uploadMutation.error) && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{uploadError ?? uploadMutation.error?.message}</p>}
+        {(uploadError || uploadMutation.error) && (
+          <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
+            {uploadError ?? uploadMutation.error?.message}
+          </p>
+        )}
         <div className="mt-5">
-          <Button type="button" disabled={!file || uploadMutation.isPending} onClick={() => uploadMutation.mutate()}>
+          <Button
+            type="button"
+            disabled={!file || uploadMutation.isPending}
+            onClick={() => uploadMutation.mutate()}
+          >
             {uploadMutation.isPending ? "Uploading…" : "Upload document"}
           </Button>
         </div>
@@ -3224,72 +3478,317 @@ function DocumentsPanel({ personId }: { personId: string }) {
       <section className="rounded-2xl bg-white p-7 shadow-soft">
         <h2 className="font-serif text-2xl">Documents</h2>
         <div className="mt-5 grid gap-3">
-          {documents.isLoading ? <p className="text-sm text-slate-500">Loading documents…</p> : documents.data?.length ? documents.data.map((document) => (
-            <article key={document.id} className="rounded-xl border border-slate-200 p-4">
-              <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
-                <div className="flex min-w-0 items-start gap-3">
-                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sand"><FileText size={18} /></div>
-                  <div className="min-w-0">
-                    <p className="truncate font-semibold">{document.title}</p>
-                    <p className="mt-1 text-xs text-slate-400">{document.original_filename} · {(document.file_size / 1024).toFixed(0)} KB</p>
-                    <p className="mt-1 text-xs capitalize text-slate-500">AI: {document.analysis_status.replaceAll("_", " ")}</p>
-                    {document.analysis_error && <p className="mt-2 text-xs text-red-600">{document.analysis_error}</p>}
+          {documents.isLoading ? (
+            <p className="text-sm text-slate-500">Loading documents…</p>
+          ) : documents.data?.length ? (
+            documents.data.map((document) => (
+              <article key={document.id} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sand">
+                      <FileText size={18} />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{document.title}</p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        {document.original_filename} · {(document.file_size / 1024).toFixed(0)} KB
+                      </p>
+                      <p className="mt-1 text-xs capitalize text-slate-500">
+                        AI: {document.analysis_status.replaceAll("_", " ")}
+                      </p>
+                      {document.analysis_error && (
+                        <p className="mt-2 text-xs text-red-600">{document.analysis_error}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      secondary
+                      onClick={() =>
+                        apiDownload(
+                          `/people/${personId}/documents/${document.id}/download`,
+                          document.original_filename,
+                        )
+                      }
+                    >
+                      <Download size={15} className="mr-2 inline" />
+                      Download
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={analyze.isPending}
+                      onClick={() => analyze.mutate(document.id)}
+                    >
+                      <Sparkles size={15} className="mr-2 inline" />
+                      {document.analysis_status === "not_analyzed" ? "Analyze" : "Analyze again"}
+                    </Button>
+                    <button
+                      type="button"
+                      className="rounded-xl p-3 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                      onClick={() =>
+                        window.confirm(`Delete ${document.title}?`) && remove.mutate(document.id)
+                      }
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" secondary onClick={() => apiDownload(`/people/${personId}/documents/${document.id}/download`, document.original_filename)}><Download size={15} className="mr-2 inline" />Download</Button>
-                  <Button type="button" disabled={analyze.isPending} onClick={() => analyze.mutate(document.id)}><Sparkles size={15} className="mr-2 inline" />{document.analysis_status === "not_analyzed" ? "Analyze" : "Analyze again"}</Button>
-                  <button type="button" className="rounded-xl p-3 text-slate-400 hover:bg-red-50 hover:text-red-600" onClick={() => window.confirm(`Delete ${document.title}?`) && remove.mutate(document.id)}><Trash2 size={16} /></button>
-                </div>
-              </div>
-            </article>
-          )) : <EmptyCapability icon={FileText} title="No documents uploaded" text="Upload the person's CV and evidence. AI can then propose profile records for human review." />}
+              </article>
+            ))
+          ) : (
+            <EmptyCapability
+              icon={FileText}
+              title="No documents uploaded"
+              text="Upload the person's CV and evidence. AI can then propose profile records for human review."
+            />
+          )}
         </div>
-        {analyze.error && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{analyze.error.message}</p>}
+        {analyze.error && (
+          <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
+            {analyze.error.message}
+          </p>
+        )}
       </section>
 
       <section className="rounded-2xl bg-white p-7 shadow-soft">
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
           <div>
-            <h2 className="font-serif text-2xl">AI suggestions</h2>
-            <p className="mt-1 text-sm text-slate-500">Nothing is written into the profile until a reviewer accepts it.</p>
+            <p className="text-xs font-bold uppercase tracking-[.18em] text-evergreen">
+              Human review queue
+            </p>
+            <h2 className="mt-2 font-serif text-2xl">AI suggestions</h2>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
+              Review the extracted facts as normal fields. Correct anything Gemini got wrong,
+              then accept it into the structured profile or reject it.
+            </p>
           </div>
-          <span className="rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">{pendingCount} pending</span>
+          <span className="h-fit rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">
+            {pendingCount} pending
+          </span>
         </div>
-        <div className="mt-5 grid gap-4">
-          {suggestions.data?.length ? suggestions.data.map((suggestion) => {
-            const isEditing = editing?.id === suggestion.id;
-            const payloadText = isEditing ? editing.payload : JSON.stringify(suggestion.payload, null, 2);
-            return (
-              <article key={suggestion.id} className="rounded-xl border border-slate-200 p-5">
-                <div className="flex flex-col justify-between gap-4 sm:flex-row">
-                  <div>
-                    <p className="text-xs font-bold uppercase tracking-wider text-evergreen">{suggestion.category}</p>
-                    <h3 className="mt-1 font-semibold">{suggestion.title}</h3>
-                    {suggestion.confidence !== null && <p className="mt-1 text-xs text-slate-400">AI confidence {Math.round(suggestion.confidence * 100)}%</p>}
+
+        <div className="mt-6 grid gap-5">
+          {suggestions.isLoading ? (
+            <p className="text-sm text-slate-500">Loading suggestions…</p>
+          ) : suggestions.data?.length ? (
+            suggestions.data.map((suggestion) => {
+              const isEditing = editingId === suggestion.id;
+              const source = documentById.get(suggestion.source_document_id);
+              const fields = suggestionFields[suggestion.category];
+
+              return (
+                <article
+                  key={suggestion.id}
+                  className="overflow-hidden rounded-2xl border border-slate-200"
+                >
+                  <div className="flex flex-col justify-between gap-4 bg-slate-50 px-5 py-4 sm:flex-row sm:items-start">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-mint px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-evergreen">
+                          {suggestion.category}
+                        </span>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500 ring-1 ring-slate-200">
+                          Awaiting review
+                        </span>
+                      </div>
+                      <h3 className="mt-3 font-semibold text-ink">{suggestion.title}</h3>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+                        {suggestion.confidence !== null && (
+                          <span>AI confidence {Math.round(suggestion.confidence * 100)}%</span>
+                        )}
+                        <span>
+                          Evidence: {source?.title ?? source?.original_filename ?? "Uploaded document"}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <Button type="button" secondary onClick={() => setEditing(isEditing ? null : { id: suggestion.id, payload: JSON.stringify(suggestion.payload, null, 2) })}>{isEditing ? "Cancel edit" : "Edit"}</Button>
-                    <Button type="button" onClick={() => accept.mutate(suggestion.id)}><Check size={15} className="mr-2 inline" />Accept</Button>
-                    <button type="button" aria-label="Reject suggestion" onClick={() => reject.mutate(suggestion.id)} className="rounded-xl bg-red-50 px-3 text-red-700"><XCircle size={17} /></button>
+
+                  <div className="p-5">
+                    {isEditing ? (
+                      <div className="grid gap-4 md:grid-cols-2">
+                        {fields.map((field) => {
+                          const value = editPayload[field.key];
+
+                          if (field.kind === "checkbox") {
+                            return (
+                              <label
+                                key={field.key}
+                                className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 md:col-span-2"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(value)}
+                                  onChange={(event) =>
+                                    updateEditValue(field.key, event.target.checked)
+                                  }
+                                  className="h-4 w-4"
+                                />
+                                {field.label}
+                              </label>
+                            );
+                          }
+
+                          if (field.kind === "textarea") {
+                            return (
+                              <label
+                                key={field.key}
+                                className="text-sm font-medium text-slate-700 md:col-span-2"
+                              >
+                                {field.label}
+                                <textarea
+                                  rows={4}
+                                  value={value == null ? "" : String(value)}
+                                  onChange={(event) =>
+                                    updateEditValue(field.key, event.target.value)
+                                  }
+                                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen"
+                                />
+                              </label>
+                            );
+                          }
+
+                          if (field.kind === "select") {
+                            return (
+                              <label key={field.key} className="text-sm font-medium text-slate-700">
+                                {field.label}
+                                <select
+                                  value={value == null ? "" : String(value)}
+                                  onChange={(event) =>
+                                    updateEditValue(field.key, event.target.value)
+                                  }
+                                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen"
+                                >
+                                  {field.options?.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            );
+                          }
+
+                          return (
+                            <label key={field.key} className="text-sm font-medium text-slate-700">
+                              {field.label}
+                              <input
+                                type={field.kind === "date" ? "date" : field.kind === "number" ? "number" : "text"}
+                                value={value == null ? "" : String(value)}
+                                onChange={(event) =>
+                                  updateEditValue(field.key, event.target.value)
+                                }
+                                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen"
+                                placeholder={field.placeholder}
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <dl className="grid gap-x-8 gap-y-4 md:grid-cols-2">
+                        {fields.map((field) => (
+                          <div
+                            key={field.key}
+                            className={field.kind === "textarea" ? "md:col-span-2" : ""}
+                          >
+                            <dt className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                              {field.label}
+                            </dt>
+                            <dd className="mt-1 whitespace-pre-line text-sm leading-6 text-slate-700">
+                              {readableSuggestionValue(suggestion.payload[field.key])}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+
+                    <label className="mt-5 block text-sm font-medium text-slate-700">
+                      Review note <span className="font-normal text-slate-400">(optional)</span>
+                      <textarea
+                        rows={2}
+                        value={reviewNotes[suggestion.id] ?? suggestion.review_note ?? ""}
+                        onChange={(event) =>
+                          setReviewNotes((current) => ({
+                            ...current,
+                            [suggestion.id]: event.target.value,
+                          }))
+                        }
+                        placeholder="Record why you changed or rejected this suggestion, if useful."
+                        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-evergreen"
+                      />
+                    </label>
+
+                    <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-5">
+                      {isEditing ? (
+                        <>
+                          <Button
+                            type="button"
+                            disabled={reviewBusy}
+                            onClick={() => acceptEdited.mutate(suggestion)}
+                          >
+                            <Check size={15} className="mr-2 inline" />
+                            {acceptEdited.isPending ? "Saving…" : "Save & accept"}
+                          </Button>
+                          <Button
+                            type="button"
+                            secondary
+                            onClick={() => {
+                              setEditingId(null);
+                              setEditPayload({});
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            type="button"
+                            disabled={reviewBusy}
+                            onClick={() => accept.mutate(suggestion)}
+                          >
+                            <Check size={15} className="mr-2 inline" />
+                            Accept as shown
+                          </Button>
+                          <Button
+                            type="button"
+                            secondary
+                            disabled={reviewBusy}
+                            onClick={() => startEditing(suggestion)}
+                          >
+                            Edit before accepting
+                          </Button>
+                          <button
+                            type="button"
+                            disabled={reviewBusy}
+                            onClick={() => reject.mutate(suggestion)}
+                            className="inline-flex items-center gap-2 rounded-xl bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                          >
+                            <XCircle size={16} />
+                            Reject
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                </div>
-                {isEditing ? (
-                  <div className="mt-4">
-                    <textarea value={payloadText} onChange={(event) => setEditing({ id: suggestion.id, payload: event.target.value })} rows={10} className="w-full rounded-xl border border-slate-200 p-3 font-mono text-xs" />
-                    <div className="mt-3"><Button type="button" disabled={saveEdit.isPending} onClick={() => {
-                      try { saveEdit.mutate({ id: suggestion.id, payload: JSON.parse(payloadText) as Record<string, unknown> }); }
-                      catch { window.alert("The edited suggestion must be valid JSON."); }
-                    }}>Save edit</Button></div>
-                  </div>
-                ) : (
-                  <pre className="mt-4 max-h-64 overflow-auto rounded-xl bg-slate-50 p-4 text-xs leading-5 text-slate-600">{JSON.stringify(suggestion.payload, null, 2)}</pre>
-                )}
-              </article>
-            );
-          }) : <EmptyCapability icon={Sparkles} title="No suggestions waiting" text="Analyze an uploaded document. Extracted facts will appear here for review before they enter the person's profile." />}
+                </article>
+              );
+            })
+          ) : (
+            <EmptyCapability
+              icon={Sparkles}
+              title="No suggestions waiting"
+              text="Analyze an uploaded document. Extracted facts will appear here as reviewable fields before they enter the person's profile."
+            />
+          )}
         </div>
-        {(accept.error || reject.error || saveEdit.error) && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{accept.error?.message ?? reject.error?.message ?? saveEdit.error?.message}</p>}
+
+        {(accept.error || reject.error || acceptEdited.error) && (
+          <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
+            {accept.error?.message ?? reject.error?.message ?? acceptEdited.error?.message}
+          </p>
+        )}
       </section>
     </div>
   );
