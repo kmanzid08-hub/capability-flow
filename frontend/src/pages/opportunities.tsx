@@ -894,6 +894,22 @@ function RequirementResultRow({
     );
 }
 
+function candidateEvidenceConfidence(candidate: CandidateMatch): number {
+    const matches = candidate.requirement_matches;
+    if (!matches.length) return 0;
+
+    const evidenceBacked = matches.filter(
+        (match) => match.evidence_json && match.evidence_json.length > 0,
+    ).length;
+    const verified = matches.filter(
+        (match) => match.status === "matched",
+    ).length;
+
+    return Math.round(
+        100 * ((0.6 * evidenceBacked + 0.4 * verified) / matches.length),
+    );
+}
+
 function CandidateCard({
     candidate,
     role,
@@ -918,6 +934,7 @@ function CandidateCard({
                 ],
             ),
         );
+    const evidenceConfidence = candidateEvidenceConfidence(candidate);
 
     return (
         <article className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -940,6 +957,10 @@ function CandidateCard({
                                 {candidate.person_name ??
                                     "Unnamed person"}
                             </h4>
+
+                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                                Active profile
+                            </span>
 
                             {candidate.mandatory_failed && (
                                 <span className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700">
@@ -984,7 +1005,7 @@ function CandidateCard({
 
             {expanded && (
                 <div className="mt-5 border-t border-slate-100 pt-5">
-                    <div className="mb-5 grid gap-3 sm:grid-cols-3">
+                    <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                         <div className="rounded-xl bg-slate-50 p-3">
                             <p className="text-xs text-slate-400">
                                 Mandatory pass
@@ -1013,6 +1034,15 @@ function CandidateCard({
 
                         <div className="rounded-xl bg-slate-50 p-3">
                             <p className="text-xs text-slate-400">
+                                Evidence confidence
+                            </p>
+                            <p className="mt-1 font-semibold">
+                                {evidenceConfidence}%
+                            </p>
+                        </div>
+
+                        <div className="rounded-xl bg-slate-50 p-3">
+                            <p className="text-xs text-slate-400">
                                 Result
                             </p>
                             <p className="mt-1 font-semibold">
@@ -1028,6 +1058,11 @@ function CandidateCard({
                             {candidate.explanation}
                         </p>
                     )}
+
+                    <div className="mb-4 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3 text-xs leading-5 text-emerald-800">
+                        Matching uses active profiles and authoritative structured records only.
+                        Pending AI suggestions are excluded until they are accepted into the profile.
+                    </div>
 
                     <div>
                         {candidate.requirement_matches.map(

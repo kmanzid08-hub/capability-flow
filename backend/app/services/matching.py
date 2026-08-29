@@ -105,7 +105,7 @@ class MatchingEngine:
             await self.session.scalars(
                 select(Person).where(
                     Person.organization_id == self.organization_id,
-                    Person.profile_status != ProfileStatus.ARCHIVED,
+                    Person.profile_status == ProfileStatus.ACTIVE,
                 )
             )
         )
@@ -614,3 +614,4 @@ class MatchingEngine:
             [],
             "Person is not recorded as available.",
         )
+ 
