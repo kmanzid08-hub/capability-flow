@@ -36,6 +36,10 @@ class GeminiTemporarilyUnavailable(RuntimeError):
     pass
 
 
+class GeminiNoUsableEvidence(RuntimeError):
+    pass
+
+
 CATEGORIES = {"profile", "skill", "education", "certification", "employment", "project"}
 
 GEMINI_MEDIA_TYPES = {
@@ -139,6 +143,12 @@ Return this JSON structure:
 }
 
 Confidence must be between 0 and 1. Keep summaries concise and factual.
+Extract every reviewable fact that is explicitly supported by the document. A professional CV
+will usually contain several skills, education, employment, certifications, projects, or useful
+profile details. Do not return empty sections merely because some optional fields are missing.
+If an employment or project record cannot be represented safely because its required date is not
+explicit enough, omit that record but still extract all other supported evidence from it, such as
+skills, qualifications, clients, sectors, responsibilities, achievements, and profile details.
 """
 
 
@@ -279,6 +289,8 @@ class ProfileAIService:
                 text=text,
             )
             suggestions = self._build_suggestions(person_id, document_id, result)
+            if not suggestions:
+                raise GeminiNoUsableEvidence("Gemini returned no reviewable profile evidence.")
 
             existing = await self.session.scalars(
                 select(ProfileSuggestion).where(
@@ -335,6 +347,24 @@ class ProfileAIService:
                 detail=message,
             ) from exc
 
+        except GeminiNoUsableEvidence as exc:
+            logger.warning(
+                "Gemini returned no usable evidence: person_id=%s document_id=%s error=%s",
+                person_id,
+                document_id,
+                str(exc),
+            )
+            await self.session.rollback()
+            message = (
+                "AI could not extract reviewable profile evidence from this document. "
+                "Your document is safe. Please retry the analysis or review it manually."
+            )
+            await self._mark_analysis_failed(document_id, message)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=message,
+            ) from exc
+
         except Exception as exc:
             logger.exception(
                 "AI document analysis failed: person_id=%s document_id=%s "
@@ -378,24 +408,23 @@ class ProfileAIService:
             f"File: {document.original_filename}.\n\n"
             "Extract only evidence that belongs to this person. Do not treat tender "
             "requirements, other team members, or client staff as the person's own "
-            "experience. Return only evidence explicitly supported by the document."
+            "experience. Return every reviewable fact explicitly supported by the document."
         )
 
         extension = document.file_extension.lower()
-        parts: list[types.Part] = []
+        base_parts: list[types.Part] = []
         if extension in GEMINI_MEDIA_TYPES:
-            parts.append(
+            base_parts.append(
                 types.Part.from_bytes(data=content, mime_type=GEMINI_MEDIA_TYPES[extension])
             )
-            parts.append(types.Part.from_text(text=prompt))
+            base_parts.append(types.Part.from_text(text=prompt))
         elif text is not None:
-            parts.append(types.Part.from_text(text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}"))
+            base_parts.append(types.Part.from_text(text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}"))
         else:
             raise UnsupportedAnalysisDocument(
                 f"AI extraction is not available for {extension or 'this file type'} yet."
             )
 
-        request_content = types.Content(role="user", parts=parts)
         transient_status_codes = {429, 500, 502, 503, 504}
         retry_delays = (0.0, 2.0, 5.0)
         last_error: Exception | None = None
@@ -403,6 +432,23 @@ class ProfileAIService:
         for attempt, delay in enumerate(retry_delays, start=1):
             if delay:
                 await asyncio.sleep(delay)
+
+            attempt_parts = list(base_parts)
+            if attempt > 1:
+                attempt_parts.append(
+                    types.Part.from_text(
+                        text=(
+                            "Previous extraction attempts were unusable or contained no "
+                            "reviewable evidence. Re-read the entire document carefully. "
+                            "Extract all explicitly supported profile details, skills, "
+                            "education, certifications, employment, and projects. Do not "
+                            "invent missing facts, but do not leave supported evidence out."
+                        )
+                    )
+                )
+
+            request_content = types.Content(role="user", parts=attempt_parts)
+
             try:
                 async with genai.Client(api_key=self.settings.gemini_api_key).aio as client:
                     response = await client.models.generate_content(
@@ -421,7 +467,9 @@ class ProfileAIService:
                 if not cleaned:
                     last_error = ValueError("Gemini returned an empty response")
                     logger.warning(
-                        "Gemini returned empty output on attempt %s/%s", attempt, len(retry_delays)
+                        "Gemini returned empty output on attempt %s/%s",
+                        attempt,
+                        len(retry_delays),
                     )
                     continue
 
@@ -436,7 +484,35 @@ class ProfileAIService:
                         str(exc),
                     )
                     continue
-                return parsed.model_dump(mode="json")
+
+                data = parsed.model_dump(mode="json")
+                counts = self._extraction_counts(data)
+                logger.info(
+                    "Gemini extraction counts: person_id=%s document_id=%s "
+                    "profile=%s skills=%s education=%s certifications=%s "
+                    "employment=%s projects=%s",
+                    person.id,
+                    document.id,
+                    counts["profile"],
+                    counts["skills"],
+                    counts["education"],
+                    counts["certifications"],
+                    counts["employment"],
+                    counts["projects"],
+                )
+
+                if not self._has_meaningful_evidence(data):
+                    last_error = GeminiNoUsableEvidence(
+                        "Gemini returned a valid but empty structured extraction."
+                    )
+                    logger.warning(
+                        "Gemini returned no reviewable evidence on attempt %s/%s",
+                        attempt,
+                        len(retry_delays),
+                    )
+                    continue
+
+                return data
 
             except Exception as exc:
                 status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
@@ -451,9 +527,37 @@ class ProfileAIService:
                     str(exc),
                 )
 
+        if isinstance(last_error, GeminiNoUsableEvidence):
+            raise last_error
+
         raise GeminiTemporarilyUnavailable(
             "Gemini did not return a usable structured response after automatic retries."
         ) from last_error
+
+    @staticmethod
+    def _extraction_counts(data: dict[str, Any]) -> dict[str, int]:
+        profile = data.get("profile")
+        profile_count = (
+            1 if isinstance(profile, dict) and any(profile.get(key) for key in profile) else 0
+        )
+
+        def item_count(key: str) -> int:
+            value = data.get(key)
+            return len(value) if isinstance(value, list) else 0
+
+        return {
+            "profile": profile_count,
+            "skills": item_count("skills"),
+            "education": item_count("education"),
+            "certifications": item_count("certifications"),
+            "employment": item_count("employment"),
+            "projects": item_count("projects"),
+        }
+
+    @classmethod
+    def _has_meaningful_evidence(cls, data: dict[str, Any]) -> bool:
+        counts = cls._extraction_counts(data)
+        return any(counts.values())
 
     def _build_suggestions(
         self,
