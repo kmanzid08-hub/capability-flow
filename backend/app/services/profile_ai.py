@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import uuid
@@ -30,6 +31,10 @@ from app.services.document_text import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class GeminiTemporarilyUnavailable(RuntimeError):
+    pass
 
 
 CATEGORIES = {"profile", "skill", "education", "certification", "employment", "project"}
@@ -231,6 +236,25 @@ class ProfileAIService:
             await self.session.rollback()
             raise
 
+        except GeminiTemporarilyUnavailable as exc:
+            logger.warning(
+                "Gemini temporarily unavailable after retries: "
+                "person_id=%s document_id=%s error=%s",
+                person_id,
+                document_id,
+                str(exc),
+            )
+            await self.session.rollback()
+            message = (
+                "Gemini is temporarily busy. Your document is safe. "
+                "Please retry the analysis in a few minutes."
+            )
+            await self._mark_analysis_failed(document_id, message)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=message,
+            ) from exc
+
         except Exception as exc:
             logger.exception(
                 "AI document analysis failed: person_id=%s document_id=%s "
@@ -304,17 +328,46 @@ class ProfileAIService:
             parts=parts,
         )
 
-        async with genai.Client(api_key=self.settings.gemini_api_key).aio as client:
-            response = await client.models.generate_content(
-                model=self.settings.ai_model,
-                contents=request_content,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    max_output_tokens=6000,
-                    temperature=0.1,
-                ),
-            )
+        transient_status_codes = {429, 500, 502, 503, 504}
+        retry_delays = (0.0, 2.0, 5.0)
+        last_error: Exception | None = None
+        response = None
+
+        for attempt, delay in enumerate(retry_delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+
+            try:
+                async with genai.Client(api_key=self.settings.gemini_api_key).aio as client:
+                    response = await client.models.generate_content(
+                        model=self.settings.ai_model,
+                        contents=request_content,
+                        config=types.GenerateContentConfig(
+                            system_instruction=SYSTEM_PROMPT,
+                            response_mime_type="application/json",
+                            max_output_tokens=6000,
+                            temperature=0.1,
+                        ),
+                    )
+                break
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+                if status_code not in transient_status_codes:
+                    raise
+
+                last_error = exc
+                logger.warning(
+                    "Transient Gemini failure on attempt %s/%s: status=%s error=%s",
+                    attempt,
+                    len(retry_delays),
+                    status_code,
+                    str(exc),
+                )
+
+        if response is None:
+            raise GeminiTemporarilyUnavailable(
+                "Gemini remained unavailable after automatic retries."
+            ) from last_error
 
         cleaned = (response.text or "").strip()
         if not cleaned:
