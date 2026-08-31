@@ -28,6 +28,20 @@ ALLOWED_MIME_TYPES: dict[str, str] = {
     ".odt": "application/vnd.oasis.opendocument.text",
     ".ods": "application/vnd.oasis.opendocument.spreadsheet",
     ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".text": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".tsv": "text/tab-separated-values",
+    ".json": "application/json",
+    ".jsonl": "application/x-ndjson",
+    ".xml": "application/xml",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
 }
 
 

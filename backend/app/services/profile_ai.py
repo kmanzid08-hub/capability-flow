@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -8,7 +7,7 @@ from typing import Any
 from fastapi import HTTPException, status
 from google import genai
 from google.genai import types
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -141,6 +140,94 @@ Return this JSON structure:
 
 Confidence must be between 0 and 1. Keep summaries concise and factual.
 """
+
+
+class AIProfileDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: str | None = None
+    professional_title: str | None = None
+    nationality: str | None = None
+    country_of_residence: str | None = None
+
+
+class AISkill(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    proficiency: str | None = None
+    years_experience: float | None = None
+    last_used_year: int | None = None
+    notes: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIEducation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    degree_level: str
+    degree_name: str | None = None
+    field_of_study: str | None = None
+    institution: str
+    country: str | None = None
+    start_year: int | None = None
+    graduation_year: int | None = None
+    notes: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AICertification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    issuer: str | None = None
+    credential_id: str | None = None
+    issue_date: str | None = None
+    expiry_date: str | None = None
+    verification_url: str | None = None
+    notes: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIEmployment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    employer_name: str
+    job_title: str
+    employment_type: str | None = None
+    industry: str | None = None
+    location: str | None = None
+    country: str | None = None
+    start_date: str
+    end_date: str | None = None
+    is_current: bool
+    description: str | None = None
+    responsibilities: str | None = None
+    achievements: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIProject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_name: str
+    client_name: str | None = None
+    role: str
+    sector: str | None = None
+    location: str | None = None
+    country: str | None = None
+    start_date: str
+    end_date: str | None = None
+    is_current: bool
+    description: str | None = None
+    responsibilities: str | None = None
+    outcomes: str | None = None
+    skills_summary: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIProfileExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: AIProfileDetails
+    skills: list[AISkill]
+    education: list[AIEducation]
+    certifications: list[AICertification]
+    employment: list[AIEmployment]
+    projects: list[AIProject]
 
 
 class ProfileAIService:
@@ -298,45 +385,31 @@ class ProfileAIService:
             f"File: {document.original_filename}.\n\n"
             "Extract only evidence that belongs to this person. Do not treat tender "
             "requirements, other team members, or client staff as the person's own "
-            "experience."
+            "experience. Return only evidence explicitly supported by the document."
         )
 
         extension = document.file_extension.lower()
         parts: list[types.Part] = []
-
         if extension in GEMINI_MEDIA_TYPES:
             parts.append(
-                types.Part.from_bytes(
-                    data=content,
-                    mime_type=GEMINI_MEDIA_TYPES[extension],
-                )
+                types.Part.from_bytes(data=content, mime_type=GEMINI_MEDIA_TYPES[extension])
             )
             parts.append(types.Part.from_text(text=prompt))
         elif text is not None:
-            parts.append(
-                types.Part.from_text(
-                    text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}",
-                )
-            )
+            parts.append(types.Part.from_text(text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}"))
         else:
             raise UnsupportedAnalysisDocument(
                 f"AI extraction is not available for {extension or 'this file type'} yet."
             )
 
-        request_content = types.Content(
-            role="user",
-            parts=parts,
-        )
-
+        request_content = types.Content(role="user", parts=parts)
         transient_status_codes = {429, 500, 502, 503, 504}
         retry_delays = (0.0, 2.0, 5.0)
         last_error: Exception | None = None
-        response = None
 
         for attempt, delay in enumerate(retry_delays, start=1):
             if delay:
                 await asyncio.sleep(delay)
-
             try:
                 async with genai.Client(api_key=self.settings.gemini_api_key).aio as client:
                     response = await client.models.generate_content(
@@ -345,16 +418,37 @@ class ProfileAIService:
                         config=types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
                             response_mime_type="application/json",
-                            max_output_tokens=6000,
+                            response_schema=AIProfileExtraction,
+                            max_output_tokens=12000,
                             temperature=0.1,
                         ),
                     )
-                break
+
+                cleaned = (response.text or "").strip()
+                if not cleaned:
+                    last_error = ValueError("Gemini returned an empty response")
+                    logger.warning(
+                        "Gemini returned empty output on attempt %s/%s", attempt, len(retry_delays)
+                    )
+                    continue
+
+                try:
+                    parsed = AIProfileExtraction.model_validate_json(cleaned)
+                except (ValidationError, ValueError) as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Gemini returned invalid structured output on attempt %s/%s: %s",
+                        attempt,
+                        len(retry_delays),
+                        str(exc),
+                    )
+                    continue
+                return parsed.model_dump(mode="json")
+
             except Exception as exc:
                 status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
                 if status_code not in transient_status_codes:
                     raise
-
                 last_error = exc
                 logger.warning(
                     "Transient Gemini failure on attempt %s/%s: status=%s error=%s",
@@ -364,25 +458,9 @@ class ProfileAIService:
                     str(exc),
                 )
 
-        if response is None:
-            raise GeminiTemporarilyUnavailable(
-                "Gemini remained unavailable after automatic retries."
-            ) from last_error
-
-        cleaned = (response.text or "").strip()
-        if not cleaned:
-            raise ValueError("Gemini returned an empty response")
-
-        if cleaned.startswith("```"):
-            cleaned = (
-                cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            )
-
-        data = json.loads(cleaned)
-        if not isinstance(data, dict):
-            raise ValueError("AI response was not an object")
-
-        return data
+        raise GeminiTemporarilyUnavailable(
+            "Gemini did not return a usable structured response after automatic retries."
+        ) from last_error
 
     def _build_suggestions(
         self,
