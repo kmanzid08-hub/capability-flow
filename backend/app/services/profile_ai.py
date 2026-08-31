@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import HTTPException, status
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -143,7 +143,6 @@ Confidence must be between 0 and 1. Keep summaries concise and factual.
 
 
 class AIProfileDetails(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     summary: str | None = None
     professional_title: str | None = None
     nationality: str | None = None
@@ -151,7 +150,6 @@ class AIProfileDetails(BaseModel):
 
 
 class AISkill(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     name: str
     proficiency: str | None = None
     years_experience: float | None = None
@@ -161,7 +159,6 @@ class AISkill(BaseModel):
 
 
 class AIEducation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     degree_level: str
     degree_name: str | None = None
     field_of_study: str | None = None
@@ -174,7 +171,6 @@ class AIEducation(BaseModel):
 
 
 class AICertification(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     name: str
     issuer: str | None = None
     credential_id: str | None = None
@@ -186,7 +182,6 @@ class AICertification(BaseModel):
 
 
 class AIEmployment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     employer_name: str
     job_title: str
     employment_type: str | None = None
@@ -203,7 +198,6 @@ class AIEmployment(BaseModel):
 
 
 class AIProject(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     project_name: str
     client_name: str | None = None
     role: str
@@ -221,7 +215,6 @@ class AIProject(BaseModel):
 
 
 class AIProfileExtraction(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     profile: AIProfileDetails
     skills: list[AISkill]
     education: list[AIEducation]
