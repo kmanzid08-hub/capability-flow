@@ -3247,7 +3247,9 @@ function normalizeSuggestionPayload(
 
 function DocumentsPanel({ personId }: { personId: string }) {
   const queryClient = useQueryClient();
-  const [file, setFile] = React.useState<File | null>(null);
+  const [files, setFiles] = React.useState<File[]>([]);
+  const [batchProgress, setBatchProgress] = React.useState<string | null>(null);
+  const [batchError, setBatchError] = React.useState<string | null>(null);
   const [documentType, setDocumentType] = React.useState<DocumentType>("cv");
   const [title, setTitle] = React.useState("");
   const [uploadError, setUploadError] = React.useState<string | null>(null);
@@ -3287,24 +3289,34 @@ function DocumentsPanel({ personId }: { personId: string }) {
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
-      if (!file) throw new Error("Choose a document first.");
+      if (!files.length) throw new Error("Choose one or more documents first.");
       setUploadError(null);
-      const form = new FormData();
-      form.append("file", file);
-      form.append("document_type", documentType);
-      if (title.trim()) form.append("title", title.trim());
-      return api<PersonDocument>(`/people/${personId}/documents`, {
-        method: "POST",
-        body: form,
-      });
+      const uploaded: PersonDocument[] = [];
+      for (let index = 0; index < files.length; index += 1) {
+        const selectedFile = files[index];
+        setBatchProgress(`Uploading ${index + 1} of ${files.length}: ${selectedFile.name}`);
+        const form = new FormData();
+        form.append("file", selectedFile);
+        form.append("document_type", documentType);
+        if (title.trim() && files.length === 1) form.append("title", title.trim());
+        uploaded.push(await api<PersonDocument>(`/people/${personId}/documents`, {
+          method: "POST",
+          body: form,
+        }));
+      }
+      return uploaded;
     },
     onSuccess: () => {
-      setFile(null);
+      setFiles([]);
       setTitle("");
+      setBatchProgress(null);
       refreshProfile();
     },
-    onError: (error) =>
-      setUploadError(error instanceof Error ? error.message : "Upload failed."),
+    onError: (error) => {
+      setBatchProgress(null);
+      setUploadError(error instanceof Error ? error.message : "Upload failed.");
+      refreshProfile();
+    },
   });
 
   const analyze = useMutation({
@@ -3314,6 +3326,38 @@ function DocumentsPanel({ personId }: { personId: string }) {
         timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
       }),
     onSuccess: refreshProfile,
+  });
+
+  const analyzeAll = useMutation({
+    mutationFn: async () => {
+      const items = documents.data ?? [];
+      if (!items.length) throw new Error("Upload documents before analyzing.");
+      setBatchError(null);
+      const failures: string[] = [];
+      for (let index = 0; index < items.length; index += 1) {
+        const document = items[index];
+        setBatchProgress(`Analyzing ${index + 1} of ${items.length}: ${document.title}`);
+        try {
+          await api(`/people/${personId}/documents/${document.id}/analyze`, {
+            method: "POST",
+            timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
+          });
+        } catch (error) {
+          failures.push(`${document.title}: ${error instanceof Error ? error.message : "Analysis failed"}`);
+        }
+        refreshProfile();
+      }
+      if (failures.length) throw new Error(failures.join(" | "));
+    },
+    onSuccess: () => {
+      setBatchProgress(null);
+      refreshProfile();
+    },
+    onError: (error) => {
+      setBatchProgress(null);
+      setBatchError(error instanceof Error ? error.message : "Some documents could not be analyzed.");
+      refreshProfile();
+    },
   });
 
   const accept = useMutation({
@@ -3331,6 +3375,36 @@ function DocumentsPanel({ personId }: { personId: string }) {
     },
     onSuccess: () => {
       setEditingId(null);
+      refreshProfile();
+    },
+  });
+
+  const acceptAll = useMutation({
+    mutationFn: async () => {
+      const pending = suggestions.data ?? [];
+      if (!pending.length) return;
+      setBatchError(null);
+      for (let index = 0; index < pending.length; index += 1) {
+        const suggestion = pending[index];
+        setBatchProgress(`Accepting ${index + 1} of ${pending.length}: ${suggestion.title}`);
+        const note = reviewNotes[suggestion.id]?.trim();
+        if (note) {
+          await api(`/people/${personId}/ai-suggestions/${suggestion.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ review_note: note }),
+          });
+        }
+        await api(`/people/${personId}/ai-suggestions/${suggestion.id}/accept`, { method: "POST" });
+      }
+    },
+    onSuccess: () => {
+      setBatchProgress(null);
+      setEditingId(null);
+      refreshProfile();
+    },
+    onError: (error) => {
+      setBatchProgress(null);
+      setBatchError(error instanceof Error ? error.message : "Accept all failed.");
       refreshProfile();
     },
   });
@@ -3380,7 +3454,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
 
   const pendingCount = suggestions.data?.length ?? 0;
   const documentById = new Map((documents.data ?? []).map((item) => [item.id, item]));
-  const reviewBusy = accept.isPending || reject.isPending || acceptEdited.isPending;
+  const reviewBusy = accept.isPending || reject.isPending || acceptEdited.isPending || acceptAll.isPending;
 
   const startEditing = (suggestion: ProfileSuggestion) => {
     setEditingId(suggestion.id);
@@ -3433,8 +3507,9 @@ function DocumentsPanel({ personId }: { personId: string }) {
             Document
             <input
               type="file"
-              accept=".pdf,.doc,.docx,.xls,.xlsx,.xlsm,.csv,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.gif,.txt,.rtf,.odt,.ods,.odp"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              multiple
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.xlsm,.csv,.tsv,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.gif,.txt,.text,.md,.markdown,.rtf,.json,.jsonl,.xml,.html,.htm,.yaml,.yml,.odt,.ods,.odp"
+              onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
               className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm"
             />
           </label>
@@ -3459,6 +3534,16 @@ function DocumentsPanel({ personId }: { personId: string }) {
             placeholder="Defaults to the filename"
           />
         </div>
+        {files.length > 0 && (
+          <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">
+            <p className="font-semibold text-ink">{files.length} document{files.length === 1 ? "" : "s"} selected</p>
+            <ul className="mt-2 space-y-1">
+              {files.map((selectedFile) => (
+                <li key={`${selectedFile.name}-${selectedFile.size}`}>{selectedFile.name} · {(selectedFile.size / 1024).toFixed(0)} KB</li>
+              ))}
+            </ul>
+          </div>
+        )}
         {(uploadError || uploadMutation.error) && (
           <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
             {uploadError ?? uploadMutation.error?.message}
@@ -3467,16 +3552,22 @@ function DocumentsPanel({ personId }: { personId: string }) {
         <div className="mt-5">
           <Button
             type="button"
-            disabled={!file || uploadMutation.isPending}
+            disabled={!files.length || uploadMutation.isPending || analyzeAll.isPending}
             onClick={() => uploadMutation.mutate()}
           >
-            {uploadMutation.isPending ? "Uploading…" : "Upload document"}
+            {uploadMutation.isPending ? batchProgress ?? "Uploading…" : `Upload ${files.length > 1 ? `${files.length} documents` : "document"}`}
           </Button>
         </div>
       </section>
 
       <section className="rounded-2xl bg-white p-7 shadow-soft">
-        <h2 className="font-serif text-2xl">Documents</h2>
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <h2 className="font-serif text-2xl">Documents</h2>
+          <Button type="button" disabled={!documents.data?.length || analyzeAll.isPending || analyze.isPending || uploadMutation.isPending} onClick={() => analyzeAll.mutate()}>
+            <Sparkles size={15} className="mr-2 inline" />
+            {analyzeAll.isPending ? batchProgress ?? "Analyzing…" : "Analyze all"}
+          </Button>
+        </div>
         <div className="mt-5 grid gap-3">
           {documents.isLoading ? (
             <p className="text-sm text-slate-500">Loading documents…</p>
@@ -3517,7 +3608,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
                     </Button>
                     <Button
                       type="button"
-                      disabled={analyze.isPending}
+                      disabled={analyze.isPending || analyzeAll.isPending}
                       onClick={() => analyze.mutate(document.id)}
                     >
                       <Sparkles size={15} className="mr-2 inline" />
@@ -3544,9 +3635,9 @@ function DocumentsPanel({ personId }: { personId: string }) {
             />
           )}
         </div>
-        {analyze.error && (
+        {(analyze.error || batchError) && (
           <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
-            {analyze.error.message}
+            {batchError ?? analyze.error?.message}
           </p>
         )}
       </section>
@@ -3563,9 +3654,17 @@ function DocumentsPanel({ personId }: { personId: string }) {
               then accept it into the structured profile or reject it.
             </p>
           </div>
-          <span className="h-fit rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">
-            {pendingCount} pending
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="h-fit rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">{pendingCount} pending</span>
+            {pendingCount > 0 && (
+              <Button type="button" disabled={reviewBusy || analyzeAll.isPending} onClick={() => {
+                if (window.confirm(`Accept all ${pendingCount} pending Gemini suggestions exactly as shown?`)) acceptAll.mutate();
+              }}>
+                <Check size={15} className="mr-2 inline" />
+                {acceptAll.isPending ? batchProgress ?? "Accepting…" : "Accept all"}
+              </Button>
+            )}
+          </div>
         </div>
 
         <div className="mt-6 grid gap-5">
@@ -3784,9 +3883,9 @@ function DocumentsPanel({ personId }: { personId: string }) {
           )}
         </div>
 
-        {(accept.error || reject.error || acceptEdited.error) && (
+        {(accept.error || reject.error || acceptEdited.error || acceptAll.error || batchError) && (
           <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
-            {accept.error?.message ?? reject.error?.message ?? acceptEdited.error?.message}
+            {batchError ?? accept.error?.message ?? reject.error?.message ?? acceptEdited.error?.message ?? acceptAll.error?.message}
           </p>
         )}
       </section>
@@ -4630,8 +4729,8 @@ export function OrganizationPage() {
                               )
                             }
                             className={`rounded-xl px-3 py-2.5 text-sm font-semibold ${member.is_active
-                                ? "bg-emerald-50 text-emerald-700"
-                                : "bg-slate-100 text-slate-500"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-slate-100 text-slate-500"
                               }`}
                           >
                             {member.is_active

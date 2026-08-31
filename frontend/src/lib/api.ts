@@ -1,4 +1,3 @@
-
 import { session } from "./session";
 
 export const API_URL =
@@ -6,7 +5,7 @@ export const API_URL =
 
 const DEFAULT_TIMEOUT_MS = 20000;
 export const AUTH_TIMEOUT_MS = 60000;
-export const AI_ANALYSIS_TIMEOUT_MS = 120000;
+export const AI_ANALYSIS_TIMEOUT_MS = 600000;
 export const OPPORTUNITY_ANALYSIS_TIMEOUT_MS = 180000;
 
 export type ApiRequestInit = RequestInit & {
