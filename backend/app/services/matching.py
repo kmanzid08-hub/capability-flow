@@ -2,6 +2,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from difflib import SequenceMatcher
 from typing import Protocol
 
 from sqlalchemy import select
@@ -68,6 +69,7 @@ class CandidateEvaluation:
     mandatory_pass_rate: float
     preferred_pass_rate: float
     mandatory_failed: bool
+    mandatory_unverified: bool
     requirement_results: dict[uuid.UUID, RequirementEvaluation]
 
 
@@ -87,8 +89,30 @@ def normalize(value: str | None) -> str:
 
 
 def contains(haystack: str | None, needle: str | None) -> bool:
+    """Conservative semantic-ish text matching for structured profile evidence.
+
+    Exact normalized containment remains strongest, but token overlap and close phrasing
+    prevent obvious false negatives such as ``financial management`` versus
+    ``management of project finances``. This never manufactures evidence: it only
+    compares text that already exists in the verified profile.
+    """
+    h = normalize(haystack)
     n = normalize(needle)
-    return bool(n and n in normalize(haystack))
+    if not h or not n:
+        return False
+    if n in h or h in n:
+        return True
+
+    h_tokens = {token for token in h.split() if len(token) > 2}
+    n_tokens = {token for token in n.split() if len(token) > 2}
+    if not h_tokens or not n_tokens:
+        return False
+
+    overlap = len(h_tokens & n_tokens) / len(n_tokens)
+    if overlap >= 0.67:
+        return True
+
+    return SequenceMatcher(None, h, n).ratio() >= 0.82
 
 
 def months_between(start: date, end: date) -> int:
@@ -105,7 +129,7 @@ class MatchingEngine:
             await self.session.scalars(
                 select(Person).where(
                     Person.organization_id == self.organization_id,
-                    Person.profile_status == ProfileStatus.ACTIVE,
+                    Person.profile_status != ProfileStatus.ARCHIVED,
                 )
             )
         )
@@ -168,6 +192,7 @@ class MatchingEngine:
         preferred_total = 0
         preferred_passed = 0
         mandatory_failed = False
+        mandatory_unverified = False
         for req in requirements:
             result = results[req.id]
             if req.importance == RequirementImportance.INFORMATIONAL:
@@ -181,7 +206,11 @@ class MatchingEngine:
                     mandatory_passed += 1
                 elif result.status == MatchStatus.PARTIAL and result.score >= 0.75:
                     mandatory_passed += 1
+                elif result.status == MatchStatus.UNVERIFIED:
+                    # Lack of verification is not proof that a qualification is absent.
+                    mandatory_unverified = True
                 else:
+                    # Only a confirmed missing/insufficient result is a hard failure.
                     mandatory_failed = True
             elif req.importance == RequirementImportance.PREFERRED:
                 preferred_total += 1
@@ -201,6 +230,7 @@ class MatchingEngine:
                 round(preferred_passed / preferred_total, 4) if preferred_total else 1.0
             ),
             mandatory_failed=mandatory_failed,
+            mandatory_unverified=mandatory_unverified,
             requirement_results=results,
         )
 
@@ -259,11 +289,21 @@ class MatchingEngine:
                     ],
                     "The skill appears in project evidence but not as a structured skill record.",
                 )
+            if profile.skills or profile.projects or profile.employment:
+                return RequirementEvaluation(
+                    MatchStatus.UNVERIFIED,
+                    0.5,
+                    [],
+                    (
+                        "No direct structured skill-name match was found. The person has "
+                        "professional evidence that may use different terminology and needs review."
+                    ),
+                )
             return RequirementEvaluation(
                 MatchStatus.MISSING,
                 0.0,
                 [],
-                "No matching skill evidence found.",
+                "No skill evidence is recorded for this person.",
             )
         best = max(matches, key=lambda skill: skill.years_experience or 0)
         years = best.years_experience or 0.0
@@ -351,8 +391,8 @@ class MatchingEngine:
         if level_only and targets:
             item = level_only[0]
             return RequirementEvaluation(
-                MatchStatus.PARTIAL,
-                0.6,
+                MatchStatus.UNVERIFIED,
+                0.65,
                 [
                     Evidence(
                         "education",
@@ -377,11 +417,24 @@ class MatchingEngine:
             if any(contains(item.name, target) for target in targets)
         ]
         if not matches:
+            if profile.certifications:
+                return RequirementEvaluation(
+                    MatchStatus.UNVERIFIED,
+                    0.5,
+                    [
+                        Evidence("certification", item.name, item.issuer)
+                        for item in profile.certifications[:5]
+                    ],
+                    (
+                        "Certifications are recorded, but no direct terminology match was found. "
+                        "Review equivalent or differently named credentials before rejecting."
+                    ),
+                )
             return RequirementEvaluation(
                 MatchStatus.MISSING,
                 0.0,
                 [],
-                "No matching certification found.",
+                "No certification evidence is recorded for this person.",
             )
         item = matches[0]
         linked_documents = [doc for doc in profile.documents if doc.certification_id == item.id]
@@ -488,11 +541,24 @@ class MatchingEngine:
                 [Evidence("project", item.project_name, item.sector) for item in matches[:5]],
                 "Relevant project experience satisfies the requirement.",
             )
+        if profile.projects:
+            return RequirementEvaluation(
+                MatchStatus.UNVERIFIED,
+                0.5,
+                [
+                    Evidence("project", item.project_name, item.sector)
+                    for item in profile.projects[:5]
+                ],
+                (
+                    "Project history exists, but no direct terminology match was found. "
+                    "Review the recorded projects for equivalent experience."
+                ),
+            )
         return RequirementEvaluation(
             MatchStatus.MISSING,
             0.0,
             [],
-            "No relevant project evidence found.",
+            "No project evidence is recorded for this person.",
         )
 
     def _sector(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
@@ -517,11 +583,21 @@ class MatchingEngine:
                 evidence,
                 "Sector evidence was found.",
             )
+        if profile.employment or profile.projects:
+            return RequirementEvaluation(
+                MatchStatus.UNVERIFIED,
+                0.5,
+                [],
+                (
+                    "Professional history exists, but the sector wording is not a direct match. "
+                    "This requires verification rather than automatic rejection."
+                ),
+            )
         return RequirementEvaluation(
             MatchStatus.MISSING,
             0.0,
             [],
-            "No matching sector evidence found.",
+            "No sector evidence is recorded for this person.",
         )
 
     def _geography(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
@@ -572,11 +648,24 @@ class MatchingEngine:
                 [Evidence("project", item.project_name, item.client_name) for item in projects[:5]],
                 "Client experience was found in project records.",
             )
+        if profile.projects:
+            return RequirementEvaluation(
+                MatchStatus.UNVERIFIED,
+                0.5,
+                [
+                    Evidence("project", item.project_name, item.client_name)
+                    for item in profile.projects[:5]
+                ],
+                (
+                    "Project/client history exists, but no direct client-name match was found. "
+                    "Review equivalent client categories before rejecting."
+                ),
+            )
         return RequirementEvaluation(
             MatchStatus.MISSING,
             0.0,
             [],
-            "No matching client experience found.",
+            "No client/project evidence is recorded for this person.",
         )
 
     def _availability(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
@@ -614,4 +703,3 @@ class MatchingEngine:
             [],
             "Person is not recorded as available.",
         )
- 

@@ -632,10 +632,18 @@ class OpportunityService:
         roles = await self.repo.roles(analysis.id)
         role_sets: list[RoleCandidateSet] = []
         top_scores: list[float] = []
+        best_unverified_by_role: dict[uuid.UUID, bool] = {}
         for role in roles:
             requirements = await self.repo.requirements(role.id)
             evaluations = [self.matching.evaluate(profile, requirements) for profile in profiles]
-            evaluations.sort(key=lambda item: (not item.mandatory_failed, item.score), reverse=True)
+            evaluations.sort(
+                key=lambda item: (
+                    not item.mandatory_failed,
+                    not item.mandatory_unverified,
+                    item.score,
+                ),
+                reverse=True,
+            )
             evaluations = evaluations[: self.settings.opportunity_max_candidates_per_role]
             persisted: list[tuple[CandidateMatch, CandidateEvaluation]] = []
             for rank, evaluation in enumerate(evaluations, start=1):
@@ -651,9 +659,14 @@ class OpportunityService:
                     mandatory_failed=evaluation.mandatory_failed,
                     rank=rank,
                     explanation=(
-                        "All mandatory requirements satisfied."
-                        if not evaluation.mandatory_failed
-                        else "One or more mandatory requirements are not fully satisfied."
+                        "One or more mandatory requirements are confirmed as not satisfied."
+                        if evaluation.mandatory_failed
+                        else (
+                            "No confirmed mandatory gap, but one or more requirements "
+                            "need verification."
+                            if evaluation.mandatory_unverified
+                            else "All mandatory requirements satisfied."
+                        )
                     ),
                 )
                 self.repo.add(match)
@@ -674,6 +687,7 @@ class OpportunityService:
                 persisted.append((match, evaluation))
             if persisted:
                 top_scores.append(float(persisted[0][0].score))
+                best_unverified_by_role[role.id] = persisted[0][1].mandatory_unverified
             role_sets.append(
                 RoleCandidateSet(
                     role.id,
@@ -692,7 +706,14 @@ class OpportunityService:
             team_constraints_ok = self._team_constraints_satisfied(
                 option.assignments, team_requirements, profiles_by_person
             )
-            effective_score = option.score if team_constraints_ok else min(option.score, 79.0)
+            team_needs_verification = any(
+                assignment.candidate.mandatory_unverified for assignment in option.assignments
+            )
+            effective_score = (
+                option.score
+                if team_constraints_ok and not team_needs_verification
+                else min(option.score, 79.0)
+            )
             team = RecommendedTeam(
                 organization_id=self.organization_id,
                 opportunity_id=opportunity.id,
@@ -700,14 +721,25 @@ class OpportunityService:
                 name=f"Recommended Team {index}",
                 score=effective_score,
                 mandatory_constraints_satisfied=(
-                    option.mandatory_constraints_satisfied and team_constraints_ok
+                    option.mandatory_constraints_satisfied
+                    and team_constraints_ok
+                    and not team_needs_verification
                 ),
                 explanation=(
                     "Assigned members satisfy role-level and team-level mandatory requirements."
-                    if option.mandatory_constraints_satisfied and team_constraints_ok
+                    if (
+                        option.mandatory_constraints_satisfied
+                        and team_constraints_ok
+                        and not team_needs_verification
+                    )
                     else (
-                        "Best available combination includes at least one mandatory role "
-                        "or team-level gap."
+                        "Best available combination has no confirmed role-level failure, but "
+                        "one or more mandatory items require verification."
+                        if team_needs_verification and team_constraints_ok
+                        else (
+                            "Best available combination includes at least one confirmed mandatory "
+                            "role or team-level gap."
+                        )
                     )
                 ),
             )
@@ -746,11 +778,30 @@ class OpportunityService:
                         analysis_id=analysis.id,
                         role_id=role.id,
                         severity="critical" if role.is_mandatory else "warning",
-                        label=f"No fully compliant internal candidate for {role.title}",
+                        label=f"Confirmed mandatory capability gap for {role.title}",
                         best_candidate_person_id=best.person_id if best else None,
                         best_candidate_score=best.score if best else None,
                         recommendation=(
-                            "Review external recruitment, subcontracting, or partner capability."
+                            "Review the failed requirements before considering external "
+                            "recruitment, subcontracting, or partner capability."
+                        ),
+                    )
+                )
+            elif best_unverified_by_role.get(role.id, False):
+                self.repo.add(
+                    CapabilityGap(
+                        organization_id=self.organization_id,
+                        opportunity_id=opportunity.id,
+                        analysis_id=analysis.id,
+                        role_id=role.id,
+                        severity="warning",
+                        label=f"Candidate evidence needs verification for {role.title}",
+                        best_candidate_person_id=best.person_id,
+                        best_candidate_score=best.score,
+                        recommendation=(
+                            "Do not treat this as a qualification failure. Review the "
+                            "candidate's evidence and terminology, then rerun the opportunity "
+                            "analysis if needed."
                         ),
                     )
                 )
