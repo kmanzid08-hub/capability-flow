@@ -2,12 +2,14 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import Any
 
 from fastapi import HTTPException, status
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
+from pypdf import PdfReader
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +24,7 @@ from app.repositories.documents import DocumentRepository
 from app.repositories.people import PersonRepository
 from app.schemas.capability import CertificationCreate, EducationCreate, SkillCreate
 from app.schemas.experience import EmploymentCreate, ProjectCreate
+from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
 from app.services.document_storage import create_document_storage
 from app.services.document_text import (
     UnsupportedAnalysisDocument,
@@ -247,6 +250,7 @@ class ProfileAIService:
         self.documents = DocumentRepository(session, organization_id)
         self.people = PersonRepository(session, organization_id)
         self.storage = create_document_storage(self.settings)
+        self.fallback_ai = FallbackAI(self.settings)
 
     async def analyze_document(self, person_id: uuid.UUID, document_id: uuid.UUID) -> int:
         person = await self.people.get(person_id)
@@ -258,11 +262,12 @@ class ProfileAIService:
                 detail="Person or document not found",
             )
 
-        if not self.settings.gemini_api_key:
+        if not self.settings.gemini_api_key and not self.fallback_ai.configured:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=(
-                    "AI analysis is not configured yet. Add GEMINI_API_KEY on the backend service."
+                    "AI analysis is not configured. Add GEMINI_API_KEY, GROQ_API_KEY, "
+                    "or OPENROUTER_API_KEY on the backend service."
                 ),
             )
 
@@ -282,7 +287,7 @@ class ProfileAIService:
                     self.settings.ai_max_document_chars,
                 )
 
-            result = await self._call_gemini(
+            result = await self._call_ai(
                 person=person,
                 document=document,
                 content=content,
@@ -393,6 +398,73 @@ class ProfileAIService:
         document.analysis_error = message
         document.last_analyzed_at = datetime.now(UTC)
         await self.session.commit()
+
+    async def _call_ai(
+        self,
+        person: Person,
+        document: PersonDocument,
+        content: bytes,
+        text: str | None,
+    ) -> dict[str, Any]:
+        gemini_error: Exception | None = None
+        if self.settings.gemini_api_key:
+            try:
+                return await self._call_gemini(person, document, content, text)
+            except (GeminiTemporarilyUnavailable, GeminiNoUsableEvidence) as exc:
+                gemini_error = exc
+                logger.warning("Gemini exhausted; trying configured fallback providers: %s", exc)
+            except Exception as exc:
+                gemini_error = exc
+                logger.warning("Gemini failed; trying configured fallback providers: %s", exc)
+
+        if not self.fallback_ai.configured:
+            if isinstance(gemini_error, GeminiNoUsableEvidence):
+                raise gemini_error
+            raise GeminiTemporarilyUnavailable(
+                "No usable AI provider is currently available"
+            ) from gemini_error
+
+        fallback_text = text
+        if fallback_text is None and document.file_extension.lower() == ".pdf":
+            try:
+                reader = PdfReader(BytesIO(content))
+                pages = [(page.extract_text() or "").strip() for page in reader.pages]
+                fallback_text = "\n\n".join(page for page in pages if page)
+                fallback_text = fallback_text[: self.settings.ai_max_document_chars]
+            except Exception as exc:
+                logger.warning("PDF fallback text extraction failed: %s", str(exc))
+                fallback_text = None
+        if not fallback_text:
+            raise GeminiTemporarilyUnavailable(
+                "Gemini failed and this document cannot be converted to text for fallback analysis"
+            ) from gemini_error
+
+        user_prompt = (
+            f"Person: {person.display_name}. Current title: "
+            f"{person.professional_title or 'not provided'}. "
+            f"Document type: {document.document_type.value}. "
+            f"File: {document.original_filename}.\n\n"
+            "Extract only evidence belonging to this person. Never treat tender requirements, "
+            "other team members, or client staff as this person's experience.\n\n"
+            f"DOCUMENT TEXT:\n{fallback_text}"
+        )
+        try:
+            data, provider = await self.fallback_ai.generate_json(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                schema=AIProfileExtraction.model_json_schema(),
+                max_tokens=12000,
+            )
+            parsed = AIProfileExtraction.model_validate(data)
+            result = parsed.model_dump(mode="json")
+            if not self._has_meaningful_evidence(result):
+                raise GeminiNoUsableEvidence(f"{provider} returned no reviewable profile evidence")
+            logger.info("Profile extraction completed via %s", provider)
+            return result
+        except (ValidationError, ValueError, AllAIProvidersUnavailable) as exc:
+            raise GeminiTemporarilyUnavailable(
+                "Gemini and all configured fallback providers failed"
+            ) from exc
 
     async def _call_gemini(
         self,

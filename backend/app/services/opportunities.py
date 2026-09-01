@@ -33,7 +33,10 @@ from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, Opp
 from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
-from app.services.requirement_extraction import GeminiRequirementExtractor
+from app.services.requirement_extraction import (
+    GeminiRequirementExtractor,
+    RequirementExtractionError,
+)
 from app.services.source_ingestion import OpportunitySourceIngestionService
 from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer
 
@@ -549,6 +552,14 @@ class OpportunityService:
             if not workflow_locked:
                 opportunity.status = OpportunityStatus.NEEDS_REVIEW
             await self.session.commit()
+            if isinstance(exc, RequirementExtractionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "All configured AI providers are currently unavailable. "
+                        "Please retry the analysis later."
+                    ),
+                ) from exc
             raise
 
     async def _persist_extracted(

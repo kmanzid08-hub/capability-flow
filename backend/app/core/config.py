@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     ai_model: str = "gemini-2.5-flash"
     groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-20b"
     openrouter_api_key: str | None = None
     openrouter_model: str = "openrouter/free"
     ai_max_document_chars: int = Field(default=120_000, ge=10_000, le=500_000)
