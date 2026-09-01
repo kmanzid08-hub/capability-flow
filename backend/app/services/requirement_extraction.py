@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from app.core.config import get_settings
 from app.core.opportunity_config import get_opportunity_intelligence_settings
 from app.schemas.opportunity import ExtractedOpportunity
+from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
 
 
 class RequirementExtractionError(RuntimeError):
@@ -57,57 +58,69 @@ class GeminiRequirementExtractor:
     def __init__(self) -> None:
         self.app_settings = get_settings()
         self.opportunity_settings = get_opportunity_intelligence_settings()
+        self.fallback_ai = FallbackAI(self.app_settings)
 
-        if not self.app_settings.gemini_api_key:
+        if not self.app_settings.gemini_api_key and not self.fallback_ai.configured:
             raise RequirementExtractionError(
-                "GEMINI_API_KEY is required for automatic opportunity analysis"
+                "Configure GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY for analysis"
             )
 
     @property
     def model_name(self) -> str:
-        return self.app_settings.ai_model
+        if self.app_settings.gemini_api_key:
+            return self.app_settings.ai_model
+        if self.app_settings.groq_api_key:
+            return f"groq:{self.app_settings.groq_model}"
+        return f"openrouter:{self.app_settings.openrouter_model}"
 
     async def extract(self, source_text: str) -> ExtractedOpportunity:
         source_text = source_text[: self.opportunity_settings.opportunity_max_source_characters]
         schema = ExtractedOpportunity.model_json_schema()
-
-        request_content = types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(
-                    text=(
-                        "Analyze the client opportunity below and return the complete "
-                        "structured result.\n\nSOURCE:\n"
-                        f"{source_text}"
-                    )
-                )
-            ],
+        user_prompt = (
+            "Analyze the client opportunity below and return the complete structured result.\n\n"
+            f"SOURCE:\n{source_text}"
         )
+        gemini_error: Exception | None = None
 
-        try:
-            async with genai.Client(api_key=self.app_settings.gemini_api_key).aio as client:
-                response = await client.models.generate_content(
-                    model=self.model_name,
-                    contents=request_content,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTIONS,
-                        response_mime_type="application/json",
-                        response_json_schema=schema,
-                        max_output_tokens=8192,
-                        temperature=0.1,
-                    ),
+        if self.app_settings.gemini_api_key:
+            request_content = types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=user_prompt)],
+            )
+            try:
+                async with genai.Client(api_key=self.app_settings.gemini_api_key).aio as client:
+                    response = await client.models.generate_content(
+                        model=self.app_settings.ai_model,
+                        contents=request_content,
+                        config=types.GenerateContentConfig(
+                            system_instruction=SYSTEM_INSTRUCTIONS,
+                            response_mime_type="application/json",
+                            response_json_schema=schema,
+                            max_output_tokens=8192,
+                            temperature=0.1,
+                        ),
+                    )
+                payload = (response.text or "").strip()
+                if not payload:
+                    raise ValueError("Gemini returned an empty opportunity analysis")
+                return ExtractedOpportunity.model_validate(json.loads(payload))
+            except Exception as exc:
+                gemini_error = exc
+
+        if self.fallback_ai.configured:
+            try:
+                data, _provider = await self.fallback_ai.generate_json(
+                    system_prompt=SYSTEM_INSTRUCTIONS,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    max_tokens=8192,
                 )
-        except Exception as exc:
-            raise RequirementExtractionError(f"Gemini analysis failed: {exc}") from exc
+                return ExtractedOpportunity.model_validate(data)
+            except (AllAIProvidersUnavailable, ValidationError, ValueError, TypeError) as exc:
+                raise RequirementExtractionError(
+                    "Gemini and all configured fallback providers failed opportunity analysis"
+                ) from exc
 
-        payload = (response.text or "").strip()
-        if not payload:
-            raise RequirementExtractionError("Gemini returned an empty opportunity analysis")
-
-        try:
-            data = json.loads(payload)
-            return ExtractedOpportunity.model_validate(data)
-        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-            raise RequirementExtractionError(
-                "Gemini returned an opportunity analysis that could not be validated"
-            ) from exc
+        raise RequirementExtractionError(
+            f"Gemini opportunity analysis failed: {gemini_error}"
+        ) from gemini_error
