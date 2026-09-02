@@ -39,6 +39,14 @@ WRITE_ROLES = {
     MembershipRole.DATA_ENTRY,
 }
 
+INLINE_PREVIEW_MIME_TYPES = {
+    "application/pdf",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
 
 def require_write_access(
     membership: ActiveMembership,
@@ -153,6 +161,58 @@ async def update_document(
     )
 
 
+def safe_content_filename(filename: str) -> str:
+    return filename.replace('"', "").replace("\r", "").replace("\n", "")
+
+
+@router.get(
+    "/{document_id}/view",
+)
+async def view_document(
+    person_id: uuid.UUID,
+    document_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Response:
+    download = await service(session, membership, user).get_download(person_id, document_id)
+    mime_type = download.document.mime_type or "application/octet-stream"
+    if mime_type not in INLINE_PREVIEW_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="This file type uses the text preview instead of the native viewer.",
+        )
+    safe_filename = safe_content_filename(download.document.original_filename)
+    return Response(
+        content=download.content,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_filename}"',
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get(
+    "/{document_id}/preview-text",
+)
+async def preview_document_text(
+    person_id: uuid.UUID,
+    document_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> dict[str, str]:
+    document, text = await service(session, membership, user).get_text_preview(
+        person_id, document_id
+    )
+    return {
+        "filename": document.original_filename,
+        "mime_type": document.mime_type or "text/plain",
+        "text": text,
+    }
+
+
 @router.get(
     "/{document_id}/download",
 )
@@ -172,21 +232,7 @@ async def download_document(
         document_id,
     )
 
-    filename = download.document.original_filename
-    safe_filename = (
-        filename.replace(
-            '"',
-            "",
-        )
-        .replace(
-            "\r",
-            "",
-        )
-        .replace(
-            "\n",
-            "",
-        )
-    )
+    safe_filename = safe_content_filename(download.document.original_filename)
 
     return Response(
         content=download.content,

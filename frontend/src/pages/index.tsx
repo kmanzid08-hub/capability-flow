@@ -14,6 +14,7 @@ import {
   FolderKanban,
   FileText,
   Download,
+  Eye,
   Sparkles,
   Check,
   XCircle,
@@ -41,7 +42,7 @@ import {
   PageHeader,
   TextArea,
 } from "../components/ui";
-import { AI_ANALYSIS_TIMEOUT_MS, API_URL, api, apiDownload } from "../lib/api";
+import { AI_ANALYSIS_TIMEOUT_MS, API_URL, api, apiBlob, apiDownload } from "../lib/api";
 import { session } from "../lib/session";
 import type {
   CurrentUser,
@@ -3256,6 +3257,14 @@ function DocumentsPanel({ personId }: { personId: string }) {
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [editPayload, setEditPayload] = React.useState<Record<string, unknown>>({});
   const [reviewNotes, setReviewNotes] = React.useState<Record<string, string>>({});
+  const [preview, setPreview] = React.useState<{
+    document: PersonDocument;
+    kind: "pdf" | "image" | "text";
+    objectUrl?: string;
+    text?: string;
+  } | null>(null);
+  const [previewBusy, setPreviewBusy] = React.useState(false);
+  const [previewError, setPreviewError] = React.useState<string | null>(null);
 
   const documents = useQuery({
     queryKey: ["documents", personId],
@@ -3456,6 +3465,49 @@ function DocumentsPanel({ personId }: { personId: string }) {
   const documentById = new Map((documents.data ?? []).map((item) => [item.id, item]));
   const reviewBusy = accept.isPending || reject.isPending || acceptEdited.isPending || acceptAll.isPending;
 
+  const closePreview = () => {
+    if (preview?.objectUrl) {
+      window.URL.revokeObjectURL(preview.objectUrl);
+    }
+    setPreview(null);
+    setPreviewError(null);
+  };
+
+  const openPreview = async (document: PersonDocument) => {
+    closePreview();
+    setPreviewBusy(true);
+    setPreviewError(null);
+    const extension = document.file_extension.toLowerCase();
+    const nativePreview =
+      extension === ".pdf" ||
+      [".jpg", ".jpeg", ".png", ".webp", ".gif"].includes(extension);
+
+    try {
+      if (nativePreview) {
+        const blob = await apiBlob(
+          `/people/${personId}/documents/${document.id}/view`,
+        );
+        const objectUrl = window.URL.createObjectURL(blob);
+        setPreview({
+          document,
+          kind: extension === ".pdf" ? "pdf" : "image",
+          objectUrl,
+        });
+      } else {
+        const result = await api<{ text: string }>(
+          `/people/${personId}/documents/${document.id}/preview-text`,
+        );
+        setPreview({ document, kind: "text", text: result.text });
+      }
+    } catch (error) {
+      setPreviewError(
+        error instanceof Error ? error.message : "Document preview failed.",
+      );
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
   const startEditing = (suggestion: ProfileSuggestion) => {
     setEditingId(suggestion.id);
     setEditPayload({ ...suggestion.payload });
@@ -3596,6 +3648,15 @@ function DocumentsPanel({ personId }: { personId: string }) {
                     <Button
                       type="button"
                       secondary
+                      disabled={previewBusy}
+                      onClick={() => void openPreview(document)}
+                    >
+                      <Eye size={15} className="mr-2 inline" />
+                      {previewBusy ? "Opening…" : "View"}
+                    </Button>
+                    <Button
+                      type="button"
+                      secondary
                       onClick={() =>
                         apiDownload(
                           `/people/${personId}/documents/${document.id}/download`,
@@ -3635,9 +3696,9 @@ function DocumentsPanel({ personId }: { personId: string }) {
             />
           )}
         </div>
-        {(analyze.error || batchError) && (
+        {(analyze.error || batchError || previewError) && (
           <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
-            {batchError ?? analyze.error?.message}
+            {previewError ?? batchError ?? analyze.error?.message}
           </p>
         )}
       </section>
@@ -3889,6 +3950,73 @@ function DocumentsPanel({ personId }: { personId: string }) {
           </p>
         )}
       </section>
+
+      {preview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Preview ${preview.document.title}`}
+        >
+          <div className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-5 py-4">
+              <div className="min-w-0">
+                <p className="truncate font-semibold text-ink">{preview.document.title}</p>
+                <p className="truncate text-xs text-slate-400">
+                  {preview.document.original_filename}
+                </p>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  type="button"
+                  secondary
+                  onClick={() =>
+                    apiDownload(
+                      `/people/${personId}/documents/${preview.document.id}/download`,
+                      preview.document.original_filename,
+                    )
+                  }
+                >
+                  <Download size={15} className="mr-2 inline" />
+                  Download
+                </Button>
+                <button
+                  type="button"
+                  aria-label="Close document preview"
+                  className="rounded-xl p-3 text-slate-500 hover:bg-slate-100 hover:text-ink"
+                  onClick={closePreview}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 bg-slate-100 p-3">
+              {preview.kind === "pdf" && preview.objectUrl && (
+                <iframe
+                  title={preview.document.title}
+                  src={preview.objectUrl}
+                  className="h-full w-full rounded-xl bg-white"
+                />
+              )}
+              {preview.kind === "image" && preview.objectUrl && (
+                <div className="flex h-full items-center justify-center overflow-auto rounded-xl bg-white p-4">
+                  <img
+                    src={preview.objectUrl}
+                    alt={preview.document.title}
+                    className="max-h-full max-w-full object-contain"
+                  />
+                </div>
+              )}
+              {preview.kind === "text" && (
+                <pre className="h-full overflow-auto whitespace-pre-wrap rounded-xl bg-white p-6 font-sans text-sm leading-6 text-slate-700">
+                  {preview.text}
+                </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

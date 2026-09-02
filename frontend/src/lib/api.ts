@@ -146,6 +146,18 @@ export async function api<T>(
   return response.json() as Promise<T>;
 }
 
+export async function apiBlob(path: string): Promise<Blob> {
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: requestHeaders({}),
+  });
+
+  if (!response.ok) {
+    throw await errorFromResponse(response);
+  }
+
+  return response.blob();
+}
+
 export async function apiDownload(
   path: string,
   filename: string,

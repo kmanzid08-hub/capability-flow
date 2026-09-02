@@ -28,6 +28,7 @@ from app.services.document_storage import (
     InvalidDocumentFile,
     create_document_storage,
 )
+from app.services.document_text import UnsupportedAnalysisDocument, extract_text
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class DocumentService:
         self.user_id = user_id
 
         settings = get_settings()
+        self.settings = settings
 
         self.storage = create_document_storage(settings)
 
@@ -263,6 +265,28 @@ class DocumentService:
             document=document,
             content=content,
         )
+
+    async def get_text_preview(
+        self,
+        person_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> tuple[PersonDocument, str]:
+        download = await self.get_download(person_id, document_id)
+        try:
+            text = extract_text(
+                download.content,
+                download.document.file_extension,
+                min(self.settings.ai_max_document_chars, 250_000),
+            )
+        except UnsupportedAnalysisDocument as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=(
+                    "A text preview is not available for this file type. "
+                    "Use Download to open the original file."
+                ),
+            ) from exc
+        return download.document, text
 
     async def delete_document(
         self,
