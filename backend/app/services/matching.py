@@ -88,31 +88,103 @@ def normalize(value: str | None) -> str:
     return " ".join((value or "").lower().replace("-", " ").replace("_", " ").split())
 
 
-def contains(haystack: str | None, needle: str | None) -> bool:
-    """Conservative semantic-ish text matching for structured profile evidence.
+def _token_stem(token: str) -> str:
+    """Small domain-safe stemmer used only for qualification terminology."""
+    token = token.strip().lower()
+    canonical_prefixes = {
+        "agricultur": "agriculture",
+        "chem": "chemistry",
+        "financ": "finance",
+        "econom": "economics",
+        "account": "accounting",
+        "environment": "environment",
+        "statist": "statistics",
+        "engineer": "engineering",
+        "biolog": "biology",
+        "geolog": "geology",
+    }
+    for prefix, canonical in canonical_prefixes.items():
+        if token.startswith(prefix):
+            return canonical
+    for suffix in ("ies", "ology", "ation", "ment", "ing", "al", "ic", "s"):
+        if len(token) > len(suffix) + 4 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
 
-    Exact normalized containment remains strongest, but token overlap and close phrasing
-    prevent obvious false negatives such as ``financial management`` versus
-    ``management of project finances``. This never manufactures evidence: it only
-    compares text that already exists in the verified profile.
+
+def _meaningful_tokens(value: str | None) -> set[str]:
+    stopwords = {
+        "and",
+        "or",
+        "the",
+        "of",
+        "in",
+        "for",
+        "with",
+        "to",
+        "a",
+        "an",
+        "degree",
+        "master",
+        "masters",
+        "bachelor",
+        "bachelors",
+        "qualification",
+        "field",
+        "fields",
+        "area",
+        "areas",
+        "relevant",
+        "related",
+        "equivalent",
+        "experience",
+        "years",
+        "year",
+        "minimum",
+        "professional",
+    }
+    return {
+        _token_stem(token)
+        for token in normalize(value).split()
+        if len(token) > 2 and token not in stopwords
+    }
+
+
+def match_strength(haystack: str | None, needle: str | None) -> float:
+    """Return a conservative 0..1 terminology match strength.
+
+    Exact containment is strongest. Token/stem overlap catches genuine variants such as
+    ``agriculture``/``agricultural`` or reordered phrases without treating unrelated
+    qualifications at the same degree level as relevant.
     """
     h = normalize(haystack)
     n = normalize(needle)
     if not h or not n:
-        return False
+        return 0.0
+    if h == n:
+        return 1.0
     if n in h or h in n:
-        return True
+        return 0.98
 
-    h_tokens = {token for token in h.split() if len(token) > 2}
-    n_tokens = {token for token in n.split() if len(token) > 2}
+    h_tokens = _meaningful_tokens(h)
+    n_tokens = _meaningful_tokens(n)
     if not h_tokens or not n_tokens:
-        return False
+        return 0.0
 
     overlap = len(h_tokens & n_tokens) / len(n_tokens)
+    if overlap >= 1.0:
+        return 0.95
     if overlap >= 0.67:
-        return True
+        return 0.88
+    if overlap >= 0.5 and len(n_tokens) >= 2:
+        return 0.78
 
-    return SequenceMatcher(None, h, n).ratio() >= 0.82
+    ratio = SequenceMatcher(None, h, n).ratio()
+    return 0.75 if ratio >= 0.86 else 0.0
+
+
+def contains(haystack: str | None, needle: str | None) -> bool:
+    return match_strength(haystack, needle) >= 0.75
 
 
 def months_between(start: date, end: date) -> int:
@@ -188,47 +260,62 @@ class MatchingEngine:
         weighted_total = 0.0
         weighted_score = 0.0
         mandatory_total = 0
-        mandatory_passed = 0
+        mandatory_credit = 0.0
         preferred_total = 0
-        preferred_passed = 0
+        preferred_credit = 0.0
         mandatory_failed = False
         mandatory_unverified = False
+
         for req in requirements:
             result = results[req.id]
             if req.importance == RequirementImportance.INFORMATIONAL:
                 continue
-            weight = max(req.weight, 0.01)
+
+            # Preserve source weighting while ensuring mandatory requirements remain dominant.
+            importance_multiplier = (
+                1.35 if req.importance == RequirementImportance.MANDATORY else 1.0
+            )
+            weight = max(req.weight, 0.01) * importance_multiplier
             weighted_total += weight
             weighted_score += weight * result.score
+
             if req.importance == RequirementImportance.MANDATORY:
                 mandatory_total += 1
                 if result.status == MatchStatus.MATCHED:
-                    mandatory_passed += 1
-                elif result.status == MatchStatus.PARTIAL and result.score >= 0.75:
-                    mandatory_passed += 1
+                    mandatory_credit += 1.0
+                elif result.status == MatchStatus.PARTIAL:
+                    # Partial credit improves ranking between genuinely close candidates, but a
+                    # partial mandatory item never becomes a full pass merely because its score
+                    # happens to be high.
+                    mandatory_credit += min(result.score, 0.85)
+                    mandatory_failed = True
                 elif result.status == MatchStatus.UNVERIFIED:
-                    # Lack of verification is not proof that a qualification is absent.
+                    mandatory_credit += min(result.score, 0.7)
                     mandatory_unverified = True
                 else:
-                    # Only a confirmed missing/insufficient result is a hard failure.
                     mandatory_failed = True
             elif req.importance == RequirementImportance.PREFERRED:
                 preferred_total += 1
-                if result.score >= 0.75:
-                    preferred_passed += 1
-        raw_score = 100.0 * (weighted_score / weighted_total) if weighted_total else 0.0
-        # A hard requirement miss caps the score so a candidate cannot look fully compliant.
-        if mandatory_failed:
-            raw_score = min(raw_score, 79.0)
+                preferred_credit += result.score
+
+        base_score = 100.0 * (weighted_score / weighted_total) if weighted_total else 0.0
+        mandatory_rate = mandatory_credit / mandatory_total if mandatory_total else 1.0
+        preferred_rate = preferred_credit / preferred_total if preferred_total else 1.0
+
+        # Make the displayed percentage meaningful: strong evidence across all requirements
+        # raises it, while confirmed mandatory gaps reduce it proportionally rather than using
+        # an arbitrary fixed 79% ceiling. This still lets genuinely close candidates rank well.
+        if mandatory_total:
+            qualification_factor = 0.55 + (0.45 * mandatory_rate)
+            raw_score = base_score * qualification_factor if mandatory_failed else base_score
+        else:
+            raw_score = base_score
+
         return CandidateEvaluation(
             person=profile.person,
-            score=round(raw_score, 2),
-            mandatory_pass_rate=(
-                round(mandatory_passed / mandatory_total, 4) if mandatory_total else 1.0
-            ),
-            preferred_pass_rate=(
-                round(preferred_passed / preferred_total, 4) if preferred_total else 1.0
-            ),
+            score=round(max(0.0, min(raw_score, 100.0)), 2),
+            mandatory_pass_rate=round(mandatory_rate, 4),
+            preferred_pass_rate=round(preferred_rate, 4),
             mandatory_failed=mandatory_failed,
             mandatory_unverified=mandatory_unverified,
             requirement_results=results,
@@ -334,101 +421,126 @@ class MatchingEngine:
     def _education(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
         min_rank = DEGREE_RANK.get(normalize(req.minimum_degree_level), 0)
         targets = self._targets(req)
-        eligible = [
+
+        level_eligible = [
             item
             for item in profile.education
             if DEGREE_RANK.get(item.degree_level.value, 0) >= min_rank
-            and (
-                not targets
-                or any(
-                    contains(item.field_of_study, target) or contains(item.degree_name, target)
-                    for target in targets
-                )
-            )
         ]
-        if eligible:
-            item = max(eligible, key=lambda degree: DEGREE_RANK.get(degree.degree_level.value, 0))
-            linked_documents = [doc for doc in profile.documents if doc.education_id == item.id]
-            if req.evidence_required and not linked_documents:
-                return RequirementEvaluation(
-                    MatchStatus.UNVERIFIED,
-                    0.7,
-                    [
-                        Evidence(
-                            "education",
-                            item.degree_name or item.degree_level.value,
-                            item.institution,
-                        )
-                    ],
+        if not level_eligible:
+            return RequirementEvaluation(
+                MatchStatus.MISSING,
+                0.0,
+                [],
+                "No education record meets the required degree level.",
+            )
+
+        if not targets:
+            field_matches = [(item, 1.0) for item in level_eligible]
+        else:
+            field_matches = []
+            for item in level_eligible:
+                strength = max(
                     (
-                        "Education satisfies the requirement, but required "
-                        "documentary evidence is not linked."
+                        max(
+                            match_strength(item.field_of_study, target),
+                            match_strength(item.degree_name, target),
+                        )
+                        for target in targets
                     ),
+                    default=0.0,
                 )
+                if strength >= 0.75:
+                    field_matches.append((item, strength))
+
+        if field_matches:
+            item, strength = max(
+                field_matches,
+                key=lambda pair: (
+                    pair[1],
+                    DEGREE_RANK.get(pair[0].degree_level.value, 0),
+                ),
+            )
+            linked_documents = [doc for doc in profile.documents if doc.education_id == item.id]
             evidence = [
                 Evidence(
                     "education",
                     item.degree_name or item.degree_level.value,
-                    item.institution,
+                    item.field_of_study or item.institution,
                 )
             ]
             evidence.extend(
                 Evidence("document", doc.title, doc.original_filename)
                 for doc in linked_documents[:3]
             )
+            if req.evidence_required and not linked_documents:
+                return RequirementEvaluation(
+                    MatchStatus.UNVERIFIED,
+                    min(0.78, strength),
+                    evidence,
+                    (
+                        "Degree level and field match, but required documentary evidence "
+                        + "is not linked."
+                    ),
+                )
+            if strength >= 0.88:
+                return RequirementEvaluation(
+                    MatchStatus.MATCHED,
+                    min(1.0, 0.92 + (strength - 0.88)),
+                    evidence,
+                    "Education level and discipline closely satisfy the requirement.",
+                )
             return RequirementEvaluation(
-                MatchStatus.MATCHED,
-                1.0,
+                MatchStatus.PARTIAL,
+                strength,
                 evidence,
-                "Education level and field satisfy the requirement"
-                + (" with linked documentary evidence." if linked_documents else "."),
+                (
+                    "Education is substantively related, but the discipline wording "
+                    + "is not an exact match."
+                ),
             )
-        level_only = [
-            item
-            for item in profile.education
-            if DEGREE_RANK.get(item.degree_level.value, 0) >= min_rank
+
+        item = max(level_eligible, key=lambda degree: DEGREE_RANK.get(degree.degree_level.value, 0))
+        evidence = [
+            Evidence(
+                "education",
+                item.degree_name or item.degree_level.value,
+                item.field_of_study,
+            )
         ]
-        if level_only and targets:
-            item = level_only[0]
-            return RequirementEvaluation(
-                MatchStatus.UNVERIFIED,
-                0.65,
-                [
-                    Evidence(
-                        "education",
-                        item.degree_name or item.degree_level.value,
-                        item.field_of_study,
-                    )
-                ],
-                "Required degree level is present, but the field is not an explicit match.",
-            )
+        # Same degree level alone is not a qualification match. Keep the person visible for
+        # review, but give only small credit so unrelated master's degrees cannot rank highly.
         return RequirementEvaluation(
-            MatchStatus.MISSING,
-            0.0,
-            [],
-            "No qualifying education record found.",
+            MatchStatus.MISSING
+            if req.importance == RequirementImportance.MANDATORY
+            else MatchStatus.UNVERIFIED,
+            0.15 if req.importance == RequirementImportance.MANDATORY else 0.3,
+            evidence,
+            (
+                "Required degree level is present, but the requested discipline is "
+                + "not supported by the education record."
+            ),
         )
 
     def _certification(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
         targets = self._targets(req)
-        matches = [
-            item
+        scored = [
+            (item, max((match_strength(item.name, target) for target in targets), default=0.0))
             for item in profile.certifications
-            if any(contains(item.name, target) for target in targets)
         ]
+        matches = [(item, strength) for item, strength in scored if strength >= 0.75]
         if not matches:
             if profile.certifications:
                 return RequirementEvaluation(
-                    MatchStatus.UNVERIFIED,
-                    0.5,
+                    MatchStatus.MISSING
+                    if req.importance == RequirementImportance.MANDATORY
+                    else MatchStatus.UNVERIFIED,
+                    0.15 if req.importance == RequirementImportance.MANDATORY else 0.3,
                     [
                         Evidence("certification", item.name, item.issuer)
                         for item in profile.certifications[:5]
                     ],
-                    (
-                        "Certifications are recorded, but no direct terminology match was found. "
-                        "Review equivalent or differently named credentials before rejecting."
-                    ),
+                    "Certification records exist, but none supports the requested credential.",
                 )
             return RequirementEvaluation(
                 MatchStatus.MISSING,
@@ -436,57 +548,117 @@ class MatchingEngine:
                 [],
                 "No certification evidence is recorded for this person.",
             )
-        item = matches[0]
+        item, strength = max(matches, key=lambda pair: pair[1])
         linked_documents = [doc for doc in profile.documents if doc.certification_id == item.id]
         if req.evidence_required and not linked_documents:
             return RequirementEvaluation(
                 MatchStatus.UNVERIFIED,
-                0.7,
+                min(0.78, strength),
                 [Evidence("certification", item.name, item.issuer)],
-                (
-                    "Certification is recorded, but the client requires documentary "
-                    "evidence and no linked file is present."
-                ),
+                "Certification matches, but required documentary evidence is not linked.",
             )
         if item.expiry_date and item.expiry_date < date.today():
             return RequirementEvaluation(
                 MatchStatus.PARTIAL,
                 0.4,
                 [Evidence("certification", item.name, f"expired {item.expiry_date.isoformat()}")],
-                "Certification exists but appears expired.",
+                "Certification matches but appears expired.",
             )
         evidence = [Evidence("certification", item.name, item.issuer)]
         evidence.extend(
             Evidence("document", doc.title, doc.original_filename) for doc in linked_documents[:3]
         )
         return RequirementEvaluation(
-            MatchStatus.MATCHED,
-            1.0,
+            MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
+            min(1.0, strength + 0.05),
             evidence,
-            "Certification record satisfies the requirement"
-            + (" and linked documentary evidence is present." if linked_documents else "."),
+            "Certification evidence closely matches the requested credential.",
         )
 
     def _experience(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
-        months = sum(
-            months_between(item.start_date, item.end_date or date.today())
+        targets = self._targets(req)
+
+        def employment_strength(item: EmploymentExperience) -> float:
+            if not targets:
+                return 1.0
+            texts = [
+                item.job_title,
+                item.industry,
+                item.description,
+                item.responsibilities,
+                item.achievements,
+                item.employer_name,
+            ]
+            return max(
+                (match_strength(text, target) for text in texts for target in targets),
+                default=0.0,
+            )
+
+        relevant = [
+            (item, employment_strength(item))
             for item in profile.employment
+            if employment_strength(item) >= 0.75
+        ]
+        months = sum(
+            months_between(item.start_date, item.end_date or date.today()) for item, _ in relevant
         )
         years = months / 12
         minimum = req.minimum_years or 0.0
-        if years >= minimum:
+
+        if relevant and (not minimum or years >= minimum):
+            strength = max(score for _, score in relevant)
+            return RequirementEvaluation(
+                MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
+                min(1.0, strength + 0.05),
+                [
+                    Evidence("employment", item.job_title, item.employer_name)
+                    for item, _ in relevant[:5]
+                ],
+                f"Found {years:.1f} years of experience relevant to the requested area.",
+            )
+
+        if relevant and minimum:
+            score = min(0.85, years / minimum) if minimum else 1.0
+            return RequirementEvaluation(
+                MatchStatus.PARTIAL,
+                score,
+                [
+                    Evidence("employment", item.job_title, item.employer_name)
+                    for item, _ in relevant[:5]
+                ],
+                f"Relevant experience is {years:.1f} years vs {minimum:g} required.",
+            )
+
+        if profile.employment and targets:
+            return RequirementEvaluation(
+                MatchStatus.MISSING
+                if req.importance == RequirementImportance.MANDATORY
+                else MatchStatus.UNVERIFIED,
+                0.1 if req.importance == RequirementImportance.MANDATORY else 0.3,
+                [],
+                (
+                    "Professional history exists, but it does not evidence the "
+                    + "requested experience area."
+                ),
+            )
+
+        total_months = sum(
+            months_between(item.start_date, item.end_date or date.today())
+            for item in profile.employment
+        )
+        total_years = total_months / 12
+        if not targets and (not minimum or total_years >= minimum):
             return RequirementEvaluation(
                 MatchStatus.MATCHED,
                 1.0,
-                [Evidence("employment", f"{years:.1f} years total professional history")],
-                "Recorded employment duration satisfies the minimum experience requirement.",
+                [Evidence("employment", f"{total_years:.1f} years total professional history")],
+                "Recorded professional history satisfies the general experience requirement.",
             )
-        score = min(0.9, years / minimum) if minimum else 1.0
         return RequirementEvaluation(
-            MatchStatus.PARTIAL if years else MatchStatus.MISSING,
-            score,
-            [Evidence("employment", f"{years:.1f} years total professional history")],
-            f"Recorded experience is {years:.1f} years vs {minimum:g} required.",
+            MatchStatus.MISSING,
+            0.0,
+            [],
+            "No qualifying experience evidence was found.",
         )
 
     def _project_experience(
@@ -495,70 +667,82 @@ class MatchingEngine:
         req: RequirementLike,
     ) -> RequirementEvaluation:
         targets = self._targets(req)
-        matches = [
-            item
-            for item in profile.projects
-            if not targets
-            or any(
-                contains(item.project_name, target)
-                or contains(item.description, target)
-                or contains(item.sector, target)
-                or contains(item.skills_summary, target)
-                for target in targets
+
+        def project_strength(item: ProjectExperience) -> float:
+            if not targets:
+                return 1.0
+            texts = [
+                item.project_name,
+                item.description,
+                item.sector,
+                item.skills_summary,
+                item.responsibilities,
+                item.outcomes,
+                item.client_name,
+            ]
+            return max(
+                (match_strength(text, target) for text in texts for target in targets),
+                default=0.0,
             )
-        ]
+
+        scored = [(item, project_strength(item)) for item in profile.projects]
+        matches = [(item, strength) for item, strength in scored if strength >= 0.75]
+
         if req.minimum_count and len(matches) < req.minimum_count:
-            score = min(0.9, len(matches) / req.minimum_count)
+            score = min(0.85, len(matches) / req.minimum_count)
             return RequirementEvaluation(
                 MatchStatus.PARTIAL if matches else MatchStatus.MISSING,
                 score,
-                [Evidence("project", item.project_name, item.sector) for item in matches[:5]],
+                [Evidence("project", item.project_name, item.sector) for item, _ in matches[:5]],
                 f"Found {len(matches)} relevant projects vs {req.minimum_count} required.",
             )
+
         if req.minimum_years:
             years = (
                 sum(
                     months_between(item.start_date, item.end_date or date.today())
-                    for item in matches
+                    for item, _ in matches
                 )
                 / 12
             )
             if years < req.minimum_years:
-                score = min(0.9, years / req.minimum_years)
+                score = min(0.85, years / req.minimum_years)
                 return RequirementEvaluation(
                     MatchStatus.PARTIAL if matches else MatchStatus.MISSING,
                     score,
-                    [Evidence("project", item.project_name, item.sector) for item in matches[:5]],
+                    [
+                        Evidence("project", item.project_name, item.sector)
+                        for item, _ in matches[:5]
+                    ],
                     (
-                        f"Relevant project duration is {years:.1f} years "
-                        f"vs {req.minimum_years:g} required."
+                        f"Relevant project duration is {years:.1f} years vs "
+                        + f"{req.minimum_years:g} required."
                     ),
                 )
+
         if matches:
+            strength = max(score for _, score in matches)
             return RequirementEvaluation(
-                MatchStatus.MATCHED,
-                1.0,
-                [Evidence("project", item.project_name, item.sector) for item in matches[:5]],
-                "Relevant project experience satisfies the requirement.",
+                MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
+                min(1.0, strength + 0.05),
+                [Evidence("project", item.project_name, item.sector) for item, _ in matches[:5]],
+                "Relevant project evidence closely satisfies the requirement.",
             )
+
         if profile.projects:
             return RequirementEvaluation(
-                MatchStatus.UNVERIFIED,
-                0.5,
+                MatchStatus.MISSING
+                if req.importance == RequirementImportance.MANDATORY
+                else MatchStatus.UNVERIFIED,
+                0.1 if req.importance == RequirementImportance.MANDATORY else 0.3,
                 [
                     Evidence("project", item.project_name, item.sector)
-                    for item in profile.projects[:5]
+                    for item in profile.projects[:3]
                 ],
-                (
-                    "Project history exists, but no direct terminology match was found. "
-                    "Review the recorded projects for equivalent experience."
-                ),
+                "Project history exists, but none supports the requested project domain.",
             )
         return RequirementEvaluation(
-            MatchStatus.MISSING,
-            0.0,
-            [],
-            "No project evidence is recorded for this person.",
+            MatchStatus.MISSING, 0.0, [], "No project evidence is recorded for this person."
         )
 
     def _sector(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:

@@ -43,6 +43,27 @@ Use weight 3 for mandatory, 1 for preferred, and 0.25 for informational unless t
 clearly supports a different relative importance.
 Include a short source_excerpt supporting each extracted requirement.
 
+Precision rules for matching:
+- Extract the exact discipline, subject area, certification, sector, geography, project type,
+  client type and experience area requested. Do not reduce a specific requirement to a broad
+  category merely to create more matches.
+- For education, separate degree level from discipline. Example: "Master's in Agriculture or
+  Chemistry" means minimum_degree_level='master' and discipline alternatives such as
+  agriculture and chemistry. A Master's in Economics or Finance is not an education match.
+- Split explicit alternatives into values and use operator='one_of'. Preserve phrases such as
+  "or related field", "equivalent", or "relevant discipline" in the label/notes, but do not
+  invent related disciplines that the source does not support.
+- For experience, do not extract only a number of years when the source requires years in a
+  particular sector, technical area, client category, or type of assignment. Preserve that
+  subject as normalized_value/values so matching evaluates relevant years rather than total
+  career length.
+- For project experience, capture the actual project domain and minimum project count/duration.
+- For certifications, preserve the specific credential or explicit alternatives. Do not treat
+  unrelated professional certificates as equivalent.
+- Precision is more important than forcing a candidate to fit. It is valid for no candidate to
+  satisfy a mandatory requirement. At the same time, preserve legitimate synonyms, acronyms,
+  reordered wording and clearly stated alternatives so genuinely qualified people are not lost.
+
 Metadata rules:
 - title is the opportunity or assignment title, not an email salutation or sender name.
 - client_name is the procuring/recruiting organization when clearly identified.
