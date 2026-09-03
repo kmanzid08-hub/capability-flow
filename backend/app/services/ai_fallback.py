@@ -22,6 +22,11 @@ class FallbackAI:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        logger.info(
+            "AI fallback configuration: groq=%s openrouter=%s",
+            bool(self.settings.groq_api_key),
+            bool(self.settings.openrouter_api_key),
+        )
 
     @property
     def configured(self) -> bool:
@@ -46,7 +51,10 @@ class FallbackAI:
                     max_tokens=max_tokens,
                 )
             except Exception as exc:
-                logger.warning("AI fallback provider exhausted: provider=groq error=%s", str(exc))
+                logger.warning(
+                    "AI fallback provider exhausted: provider=groq error=%s",
+                    str(exc),
+                )
                 errors.append(f"groq: {type(exc).__name__}")
 
         if self.settings.openrouter_api_key:
@@ -59,7 +67,8 @@ class FallbackAI:
                 )
             except Exception as exc:
                 logger.warning(
-                    "AI fallback provider exhausted: provider=openrouter error=%s", str(exc)
+                    "AI fallback provider exhausted: provider=openrouter error=%s",
+                    str(exc),
                 )
                 errors.append(f"openrouter: {type(exc).__name__}")
 
@@ -100,7 +109,10 @@ class FallbackAI:
                 candidates,
             )
         except Exception as exc:
-            logger.warning("Groq model discovery failed; using preferred candidates: %s", str(exc))
+            logger.warning(
+                "Groq model discovery failed; using preferred candidates: %s",
+                str(exc),
+            )
 
         errors: list[str] = []
         for model in candidates:
@@ -114,7 +126,10 @@ class FallbackAI:
                     max_tokens=max_tokens,
                     require_parameters=False,
                 )
-                logger.info("AI fallback succeeded with provider=groq model=%s", model)
+                logger.info(
+                    "AI fallback succeeded with provider=groq model=%s",
+                    model,
+                )
                 return data, f"groq:{model}"
             except Exception as exc:
                 logger.warning("Groq model failed: model=%s error=%s", model, str(exc))
@@ -158,7 +173,10 @@ class FallbackAI:
                 max_tokens=max_tokens,
                 require_parameters=True,
             )
-            logger.info("AI fallback succeeded with provider=openrouter model=%s", model)
+            logger.info(
+                "AI fallback succeeded with provider=openrouter model=%s",
+                model,
+            )
             return data, f"openrouter:{model}"
         except Exception as structured_exc:
             logger.warning(
@@ -179,7 +197,8 @@ class FallbackAI:
             max_tokens=max_tokens,
         )
         logger.info(
-            "AI fallback succeeded with provider=openrouter model=%s mode=json_object", model
+            "AI fallback succeeded with provider=openrouter model=%s mode=json_object",
+            model,
         )
         return data, f"openrouter:{model}"
 
