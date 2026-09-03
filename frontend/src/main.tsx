@@ -21,13 +21,17 @@ const queryClient = new QueryClient({
             // to a recently visited page feels immediate.
             gcTime: 10 * 60_000,
 
-            // Do not refetch everything simply because the user
-            // switches away from the browser and comes back.
-            refetchOnWindowFocus: false,
+            // Keep active workspace views synchronized with changes made
+            // by other members. This only refetches server state; it never
+            // deletes, replaces, or copies records between workspaces.
+            refetchInterval: 30_000,
+            refetchIntervalInBackground: true,
 
-            // Refresh stale information after the internet connection
-            // is restored.
-            refetchOnReconnect: true,
+            // Re-check immediately when a view is opened again, when the
+            // browser regains focus, or when connectivity returns.
+            refetchOnMount: "always",
+            refetchOnWindowFocus: "always",
+            refetchOnReconnect: "always",
 
             // Avoid repeatedly retrying slow or failed Render requests.
             retry: 1,

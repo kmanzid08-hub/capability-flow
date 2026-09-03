@@ -3391,24 +3391,53 @@ function DocumentsPanel({ personId }: { personId: string }) {
   const acceptAll = useMutation({
     mutationFn: async () => {
       const pending = suggestions.data ?? [];
-      if (!pending.length) return;
+      if (!pending.length) {
+        return { total: 0, accepted: 0, failed: 0, failures: [] as Array<{ title: string; detail: string }> };
+      }
+
       setBatchError(null);
-      for (let index = 0; index < pending.length; index += 1) {
-        const suggestion = pending[index];
-        setBatchProgress(`Accepting ${index + 1} of ${pending.length}: ${suggestion.title}`);
+      setBatchProgress(`Accepting ${pending.length} AI suggestions…`);
+
+      // Save any reviewer notes first. A note failure should not prevent the
+      // remaining suggestions from being accepted.
+      for (const suggestion of pending) {
         const note = reviewNotes[suggestion.id]?.trim();
-        if (note) {
+        if (!note) continue;
+        try {
           await api(`/people/${personId}/ai-suggestions/${suggestion.id}`, {
             method: "PATCH",
             body: JSON.stringify({ review_note: note }),
           });
+        } catch {
+          // The backend accept-all endpoint is deliberately resilient and will
+          // continue with every other valid suggestion.
         }
-        await api(`/people/${personId}/ai-suggestions/${suggestion.id}/accept`, { method: "POST" });
       }
+
+      return api<{
+        total: number;
+        accepted: number;
+        failed: number;
+        failures: Array<{ suggestion_id: string; title: string; detail: string }>;
+      }>(`/people/${personId}/ai-suggestions/accept-all`, {
+        method: "POST",
+      });
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       setBatchProgress(null);
       setEditingId(null);
+      if (result.failed > 0) {
+        const examples = result.failures
+          .slice(0, 3)
+          .map((item) => `${item.title}: ${item.detail}`)
+          .join(" | ");
+        setBatchError(
+          `${result.accepted} of ${result.total} suggestions were saved. ` +
+            `${result.failed} still need review.${examples ? ` ${examples}` : ""}`,
+        );
+      } else {
+        setBatchError(null);
+      }
       refreshProfile();
     },
     onError: (error) => {
@@ -4922,3 +4951,4 @@ export function OrganizationPage() {
     </div>
   );
 }
+

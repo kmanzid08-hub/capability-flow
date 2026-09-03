@@ -764,33 +764,130 @@ class ProfileAIService:
         suggestion = await self._get_suggestion(person_id, suggestion_id)
         if suggestion.status != "pending":
             return suggestion
+
         try:
             entity_type, entity_id = await self._apply(person_id, suggestion)
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=exc.errors(),
-            ) from exc
 
-        suggestion.status = "accepted"
-        suggestion.applied_entity_id = entity_id
-        suggestion.reviewed_by_user_id = self.user_id
-        suggestion.reviewed_at = datetime.now(UTC)
-        if entity_id is not None:
-            self.session.add(
-                EvidenceLink(
-                    organization_id=self.organization_id,
+            suggestion.status = "accepted"
+            suggestion.applied_entity_id = entity_id
+            suggestion.reviewed_by_user_id = self.user_id
+            suggestion.reviewed_at = datetime.now(UTC)
+
+            if entity_id is not None:
+                await self._ensure_evidence_link(
                     person_id=person_id,
                     document_id=suggestion.source_document_id,
                     entity_type=entity_type,
                     entity_id=entity_id,
-                    created_by_user_id=self.user_id,
                 )
+
+            await self.session.commit()
+        except ValidationError as exc:
+            await self.session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=exc.errors(),
+            ) from exc
+        except HTTPException:
+            await self.session.rollback()
+            raise
+        except Exception as exc:
+            await self.session.rollback()
+            logger.exception(
+                "Accepting AI suggestion failed: person_id=%s suggestion_id=%s error=%s",
+                person_id,
+                suggestion_id,
+                str(exc),
             )
-        await self.session.commit()
-        await self.session.refresh(suggestion)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This suggestion could not be saved, but previously accepted profile "
+                    "information is safe. Please retry this item."
+                ),
+            ) from exc
+
+        suggestion = await self._get_suggestion(person_id, suggestion_id)
         await self._refresh_document_status(suggestion.source_document_id)
         return suggestion
+
+    async def accept_all(self, person_id: uuid.UUID) -> dict[str, Any]:
+        pending_result = await self.session.scalars(
+            select(ProfileSuggestion)
+            .where(
+                ProfileSuggestion.organization_id == self.organization_id,
+                ProfileSuggestion.person_id == person_id,
+                ProfileSuggestion.status == "pending",
+            )
+            .order_by(ProfileSuggestion.created_at.asc())
+        )
+        pending = list(pending_result)
+
+        accepted = 0
+        failures: list[dict[str, str]] = []
+
+        for suggestion in pending:
+            try:
+                await self.accept(person_id, suggestion.id)
+                accepted += 1
+            except HTTPException as exc:
+                await self.session.rollback()
+                detail = exc.detail
+                if isinstance(detail, str):
+                    message = detail
+                else:
+                    message = "This suggestion needs manual review before it can be saved."
+                failures.append(
+                    {
+                        "suggestion_id": str(suggestion.id),
+                        "title": suggestion.title,
+                        "detail": message,
+                    }
+                )
+                logger.warning(
+                    "Accept-all skipped one suggestion and continued: "
+                    "person_id=%s suggestion_id=%s detail=%s",
+                    person_id,
+                    suggestion.id,
+                    message,
+                )
+
+        return {
+            "total": len(pending),
+            "accepted": accepted,
+            "failed": len(failures),
+            "failures": failures,
+        }
+
+    async def _ensure_evidence_link(
+        self,
+        person_id: uuid.UUID,
+        document_id: uuid.UUID,
+        entity_type: str,
+        entity_id: uuid.UUID,
+    ) -> None:
+        existing_link = await self.session.scalar(
+            select(EvidenceLink.id).where(
+                EvidenceLink.organization_id == self.organization_id,
+                EvidenceLink.person_id == person_id,
+                EvidenceLink.document_id == document_id,
+                EvidenceLink.entity_type == entity_type,
+                EvidenceLink.entity_id == entity_id,
+            )
+        )
+        if existing_link is not None:
+            return
+
+        self.session.add(
+            EvidenceLink(
+                organization_id=self.organization_id,
+                person_id=person_id,
+                document_id=document_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                created_by_user_id=self.user_id,
+            )
+        )
 
     async def _apply(
         self,

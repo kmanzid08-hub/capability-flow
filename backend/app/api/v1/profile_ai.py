@@ -140,6 +140,25 @@ async def edit_suggestion(
     )
 
 
+@router.post("/ai-suggestions/accept-all")
+async def accept_all_suggestions(
+    person_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> dict[str, object]:
+    _require(
+        membership.role,
+        REVIEW_ROLES,
+    )
+
+    return await _service(
+        session,
+        membership,
+        user,
+    ).accept_all(person_id)
+
+
 @router.post(
     "/ai-suggestions/{suggestion_id}/accept",
     response_model=ProfileSuggestionResponse,
