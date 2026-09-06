@@ -3346,13 +3346,30 @@ function DocumentsPanel({ personId }: { personId: string }) {
       for (let index = 0; index < items.length; index += 1) {
         const document = items[index];
         setBatchProgress(`Analyzing ${index + 1} of ${items.length}: ${document.title}`);
-        try {
-          await api(`/people/${personId}/documents/${document.id}/analyze`, {
-            method: "POST",
-            timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
-          });
-        } catch (error) {
-          failures.push(`${document.title}: ${error instanceof Error ? error.message : "Analysis failed"}`);
+        let lastError: unknown = null;
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          try {
+            await api(`/people/${personId}/documents/${document.id}/analyze`, {
+              method: "POST",
+              timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
+            });
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            const message = error instanceof Error ? error.message : "Analysis failed";
+            const retryableFetchFailure = /failed to fetch|network|load failed/i.test(message);
+            if (!retryableFetchFailure || attempt === 2) break;
+            setBatchProgress(
+              `Retrying ${index + 1} of ${items.length}: ${document.title}`,
+            );
+            await new Promise((resolve) => window.setTimeout(resolve, 2000));
+          }
+        }
+        if (lastError) {
+          failures.push(
+            `${document.title}: ${lastError instanceof Error ? lastError.message : "Analysis failed"}`,
+          );
         }
         refreshProfile();
       }

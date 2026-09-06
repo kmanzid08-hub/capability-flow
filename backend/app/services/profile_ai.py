@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -343,7 +344,7 @@ class ProfileAIService:
             )
             await self.session.rollback()
             message = (
-                "Gemini is temporarily busy. Your document is safe. "
+                "AI providers are temporarily unavailable. Your document is safe. "
                 "Please retry the analysis in a few minutes."
             )
             await self._mark_analysis_failed(document_id, message)
@@ -439,32 +440,111 @@ class ProfileAIService:
                 "Gemini failed and this document cannot be converted to text for fallback analysis"
             ) from gemini_error
 
-        user_prompt = (
-            f"Person: {person.display_name}. Current title: "
-            f"{person.professional_title or 'not provided'}. "
-            f"Document type: {document.document_type.value}. "
-            f"File: {document.original_filename}.\n\n"
-            "Extract only evidence belonging to this person. Never treat tender requirements, "
-            "other team members, or client staff as this person's experience.\n\n"
-            f"DOCUMENT TEXT:\n{fallback_text}"
-        )
+        chunks = self._chunk_fallback_text(fallback_text)
+        results: list[dict[str, Any]] = []
+        providers: list[str] = []
         try:
-            data, provider = await self.fallback_ai.generate_json(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                schema=AIProfileExtraction.model_json_schema(),
-                max_tokens=12000,
-            )
-            parsed = AIProfileExtraction.model_validate(data)
-            result = parsed.model_dump(mode="json")
+            for index, chunk in enumerate(chunks, start=1):
+                user_prompt = (
+                    f"Person: {person.display_name}. Current title: "
+                    f"{person.professional_title or 'not provided'}. "
+                    f"Document type: {document.document_type.value}. "
+                    f"File: {document.original_filename}. "
+                    f"Document chunk {index} of {len(chunks)}.\n\n"
+                    "Extract only evidence belonging to this person. Never treat tender requirements, "  # noqa: E501
+                    "other team members, or client staff as this person's experience. Extract every "  # noqa: E501  # noqa: E501
+                    "supported fact visible in this chunk; do not infer missing facts.\n\n"
+                    f"DOCUMENT TEXT:\n{chunk}"
+                )
+                data, provider = await self.fallback_ai.generate_json(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    schema=AIProfileExtraction.model_json_schema(),
+                    max_tokens=3500,
+                )
+                parsed = AIProfileExtraction.model_validate(data)
+                results.append(parsed.model_dump(mode="json"))
+                providers.append(provider)
+                logger.info(
+                    "Fallback profile chunk completed: chunk=%s/%s provider=%s",
+                    index,
+                    len(chunks),
+                    provider,
+                )
+            result = self._merge_extractions(results)
             if not self._has_meaningful_evidence(result):
-                raise GeminiNoUsableEvidence(f"{provider} returned no reviewable profile evidence")
-            logger.info("Profile extraction completed via %s", provider)
+                raise GeminiNoUsableEvidence(
+                    "Fallback providers returned no reviewable profile evidence"
+                )
+            logger.info("Profile extraction completed via fallback providers=%s", providers)
             return result
+        except GeminiNoUsableEvidence:
+            raise
         except (ValidationError, ValueError, AllAIProvidersUnavailable) as exc:
             raise GeminiTemporarilyUnavailable(
-                "Gemini and all configured fallback providers failed"
+                "All configured AI providers are temporarily unavailable"
             ) from exc
+
+    @staticmethod
+    def _is_hard_gemini_quota_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "generaterequestsperdayperprojectpermodel" in message
+            or "free_tier_requests" in message
+            or "perdayperprojectpermodel" in message
+        )
+
+    @staticmethod
+    def _chunk_fallback_text(text: str, max_chars: int = 14000) -> list[str]:
+        text = text.strip()
+        if len(text) <= max_chars:
+            return [text]
+        chunks: list[str] = []
+        start = 0
+        overlap = 800
+        while start < len(text):
+            end = min(len(text), start + max_chars)
+            if end < len(text):
+                split = max(text.rfind("\n\n", start, end), text.rfind("\n", start, end))
+                if split > start + max_chars // 2:
+                    end = split
+            chunks.append(text[start:end].strip())
+            if end >= len(text):
+                break
+            start = max(start + 1, end - overlap)
+        return [chunk for chunk in chunks if chunk]
+
+    @staticmethod
+    def _merge_extractions(results: list[dict[str, Any]]) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "profile": {
+                "summary": None,
+                "professional_title": None,
+                "nationality": None,
+                "country_of_residence": None,
+            },
+            "skills": [],
+            "education": [],
+            "certifications": [],
+            "employment": [],
+            "projects": [],
+        }
+        for result in results:
+            profile = result.get("profile") or {}
+            for key in merged["profile"]:
+                if not merged["profile"][key] and profile.get(key):
+                    merged["profile"][key] = profile[key]
+            for category in ("skills", "education", "certifications", "employment", "projects"):
+                existing = {
+                    json.dumps(item, sort_keys=True, default=str).lower()
+                    for item in merged[category]
+                }
+                for item in result.get(category) or []:
+                    marker = json.dumps(item, sort_keys=True, default=str).lower()
+                    if marker not in existing:
+                        merged[category].append(item)
+                        existing.add(marker)
+        return merged
 
     async def _call_gemini(
         self,
@@ -530,7 +610,7 @@ class ProfileAIService:
                             system_instruction=SYSTEM_PROMPT,
                             response_mime_type="application/json",
                             response_schema=AIProfileExtraction,
-                            max_output_tokens=12000,
+                            max_output_tokens=6000,
                             temperature=0.1,
                         ),
                     )
@@ -588,6 +668,11 @@ class ProfileAIService:
 
             except Exception as exc:
                 status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+                if self._is_hard_gemini_quota_error(exc):
+                    logger.warning(
+                        "Gemini daily quota exhausted; switching immediately to fallback providers"
+                    )
+                    raise GeminiTemporarilyUnavailable("Gemini daily quota is exhausted") from exc
                 if status_code not in transient_status_codes:
                     raise
                 last_error = exc

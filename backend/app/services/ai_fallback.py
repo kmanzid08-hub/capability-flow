@@ -40,6 +40,9 @@ class FallbackAI:
         schema: dict[str, Any],
         max_tokens: int,
     ) -> tuple[dict[str, Any], str]:
+        # Free fallback tiers commonly enforce tight TPM limits. Keep output bounded;
+        # callers should chunk large source text rather than sending oversized requests.
+        max_tokens = min(max_tokens, 3500)
         errors: list[str] = []
 
         if self.settings.groq_api_key:
@@ -291,3 +294,4 @@ class FallbackAI:
         if not isinstance(data, dict):
             raise ValueError("provider did not return a JSON object")
         return data
+
