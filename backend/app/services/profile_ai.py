@@ -907,13 +907,14 @@ class ProfileAIService:
             .order_by(ProfileSuggestion.created_at.asc())
         )
         pending = list(pending_result)
+        pending_items = [(suggestion.id, suggestion.title) for suggestion in pending]
 
         accepted = 0
         failures: list[dict[str, str]] = []
 
-        for suggestion in pending:
+        for suggestion_id, suggestion_title in pending_items:
             try:
-                await self.accept(person_id, suggestion.id)
+                await self.accept(person_id, suggestion_id)
                 accepted += 1
             except HTTPException as exc:
                 await self.session.rollback()
@@ -924,8 +925,8 @@ class ProfileAIService:
                     message = "This suggestion needs manual review before it can be saved."
                 failures.append(
                     {
-                        "suggestion_id": str(suggestion.id),
-                        "title": suggestion.title,
+                        "suggestion_id": str(suggestion_id),
+                        "title": suggestion_title,
                         "detail": message,
                     }
                 )
@@ -933,12 +934,29 @@ class ProfileAIService:
                     "Accept-all skipped one suggestion and continued: "
                     "person_id=%s suggestion_id=%s detail=%s",
                     person_id,
-                    suggestion.id,
+                    suggestion_id,
                     message,
+                )
+            except Exception as exc:
+                await self.session.rollback()
+                message = "This suggestion could not be saved and needs manual review."
+                failures.append(
+                    {
+                        "suggestion_id": str(suggestion_id),
+                        "title": suggestion_title,
+                        "detail": message,
+                    }
+                )
+                logger.exception(
+                    "Accept-all encountered an unexpected error and continued: "
+                    "person_id=%s suggestion_id=%s error=%s",
+                    person_id,
+                    suggestion_id,
+                    str(exc),
                 )
 
         return {
-            "total": len(pending),
+            "total": len(pending_items),
             "accepted": accepted,
             "failed": len(failures),
             "failures": failures,
@@ -979,7 +997,23 @@ class ProfileAIService:
         person_id: uuid.UUID,
         suggestion: ProfileSuggestion,
     ) -> tuple[str, uuid.UUID | None]:
-        payload = suggestion.payload
+        payload = dict(suggestion.payload)
+
+        if suggestion.category in {"employment", "project"}:
+            end_date = payload.get("end_date")
+            if end_date == "":
+                payload["end_date"] = None
+                end_date = None
+            if end_date is not None and payload.get("is_current") is True:
+                payload["is_current"] = False
+                suggestion.payload = payload
+                logger.info(
+                    "Normalized AI suggestion with end date marked current: "
+                    "person_id=%s suggestion_id=%s category=%s",
+                    person_id,
+                    suggestion.id,
+                    suggestion.category,
+                )
 
         if suggestion.category == "profile":
             person = await self.people.get(person_id)
