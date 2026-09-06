@@ -365,3 +365,67 @@ async def test_document_size_limit_is_enforced(
     assert not stored_files(
         document_storage,
     )
+
+
+async def test_office_temporary_document_is_rejected(
+    client: AsyncClient,
+    document_storage: Path,
+) -> None:
+    registration = await register(
+        client,
+        "office-temp",
+    )
+
+    person = await create_person(
+        client,
+        registration,
+    )
+
+    response = await client.post(
+        f"/api/v1/people/{person['id']}/documents",
+        headers=headers(registration),
+        data={"document_type": "cv"},
+        files={
+            "file": (
+                "~$Innocent_CV_Updated_9-9-2024.docx",
+                b"word-lock-file",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        },
+    )
+
+    assert response.status_code == 415
+    assert "temporary file" in response.json()["detail"].lower()
+    assert not stored_files(document_storage)
+
+
+async def test_empty_document_is_rejected(
+    client: AsyncClient,
+    document_storage: Path,
+) -> None:
+    registration = await register(
+        client,
+        "empty-file",
+    )
+
+    person = await create_person(
+        client,
+        registration,
+    )
+
+    response = await client.post(
+        f"/api/v1/people/{person['id']}/documents",
+        headers=headers(registration),
+        data={"document_type": "cv"},
+        files={
+            "file": (
+                "empty.docx",
+                b"",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        },
+    )
+
+    assert response.status_code == 415
+    assert "empty files are not allowed" in response.json()["detail"].lower()
+    assert not stored_files(document_storage)

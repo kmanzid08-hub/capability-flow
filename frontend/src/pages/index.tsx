@@ -3074,6 +3074,17 @@ function ProjectsPanel({
 }
 
 
+function validateDocumentSelection(file: File): string | null {
+  const lowerName = file.name.toLowerCase();
+  if (file.name.startsWith("~$") || lowerName.startsWith(".~lock.")) {
+    return `${file.name} is an Office temporary file. Close the document in Word/LibreOffice and upload the original file instead.`;
+  }
+  if (file.size === 0) {
+    return `${file.name} is empty (0 KB). Please upload the original document.`;
+  }
+  return null;
+}
+
 const documentTypeOptions: { value: DocumentType; label: string }[] = [
   { value: "cv", label: "CV / Resume" },
   { value: "certificate", label: "Professional certificate" },
@@ -3574,7 +3585,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
             {completeness.data?.profile_percent ?? 0}% complete
           </p>
           <p className="mt-2 text-sm text-white/65">
-            Gemini can propose profile facts, but nothing becomes verified profile data
+            AI can propose profile facts, but nothing becomes verified profile data
             until a teammate reviews and accepts it.
           </p>
         </div>
@@ -3595,7 +3606,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
             <h2 className="font-serif text-2xl">Upload evidence</h2>
             <p className="mt-1 text-sm text-slate-500">
               Upload CVs, degrees, certificates, reference letters and project evidence.
-              Gemini can analyze PDFs and common image formats directly.
+              AI can analyze PDFs and common image formats directly, including scanned PDFs through page-image recovery.
             </p>
           </div>
           <Upload className="text-evergreen" size={24} />
@@ -3607,7 +3618,20 @@ function DocumentsPanel({ personId }: { personId: string }) {
               type="file"
               multiple
               accept=".pdf,.doc,.docx,.xls,.xlsx,.xlsm,.csv,.tsv,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.gif,.txt,.text,.md,.markdown,.rtf,.json,.jsonl,.xml,.html,.htm,.yaml,.yml,.odt,.ods,.odp"
-              onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+              onChange={(event) => {
+                const selected = Array.from(event.target.files ?? []);
+                const invalid = selected
+                  .map((file) => validateDocumentSelection(file))
+                  .find((message): message is string => Boolean(message));
+                if (invalid) {
+                  setFiles([]);
+                  setUploadError(invalid);
+                  event.currentTarget.value = "";
+                  return;
+                }
+                setUploadError(null);
+                setFiles(selected);
+              }}
               className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm"
             />
           </label>
@@ -3757,7 +3781,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
             </p>
             <h2 className="mt-2 font-serif text-2xl">AI suggestions</h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
-              Review the extracted facts as normal fields. Correct anything Gemini got wrong,
+              Review the extracted facts as normal fields. Correct anything the AI got wrong,
               then accept it into the structured profile or reject it.
             </p>
           </div>
@@ -3765,7 +3789,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
             <span className="h-fit rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">{pendingCount} pending</span>
             {pendingCount > 0 && (
               <Button type="button" disabled={reviewBusy || analyzeAll.isPending} onClick={() => {
-                if (window.confirm(`Accept all ${pendingCount} pending Gemini suggestions exactly as shown?`)) acceptAll.mutate();
+                if (window.confirm(`Accept all ${pendingCount} pending AI suggestions exactly as shown?`)) acceptAll.mutate();
               }}>
                 <Check size={15} className="mr-2 inline" />
                 {acceptAll.isPending ? batchProgress ?? "Accepting…" : "Accept all"}
@@ -4968,4 +4992,3 @@ export function OrganizationPage() {
     </div>
   );
 }
-

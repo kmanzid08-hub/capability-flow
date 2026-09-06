@@ -157,6 +157,11 @@ class FallbackAI:
                         return text, f"groq:{model}:vision"
                     except Exception as exc:
                         last_error = exc
+                        if self._is_hard_rate_limit(exc):
+                            logger.warning(
+                                "Groq vision hard quota/rate limit detected; stopping model retries"
+                            )
+                            break
                 if last_error is not None:
                     raise last_error
             except Exception as exc:

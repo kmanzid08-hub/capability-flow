@@ -1,11 +1,11 @@
-import asyncio
-import json
+﻿import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 
+import pymupdf
 from fastapi import HTTPException, status
 from google import genai
 from google.genai import types
@@ -26,7 +26,7 @@ from app.repositories.people import PersonRepository
 from app.schemas.capability import CertificationCreate, EducationCreate, SkillCreate
 from app.schemas.experience import EmploymentCreate, ProjectCreate
 from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
-from app.services.document_storage import create_document_storage
+from app.services.document_storage import create_document_storage, is_temporary_document_filename
 from app.services.document_text import (
     UnsupportedAnalysisDocument,
     extract_text,
@@ -41,6 +41,10 @@ class GeminiTemporarilyUnavailable(RuntimeError):
 
 
 class GeminiNoUsableEvidence(RuntimeError):
+    pass
+
+
+class DocumentTextRecoveryUnavailable(RuntimeError):
     pass
 
 
@@ -151,8 +155,12 @@ Extract every reviewable fact that is explicitly supported by the document. A pr
 will usually contain several skills, education, employment, certifications, projects, or useful
 profile details. Do not return empty sections merely because some optional fields are missing.
 If an employment or project record cannot be represented safely because its required date is not
-explicit enough, omit that record but still extract all other supported evidence from it, such as
-skills, qualifications, clients, sectors, responsibilities, achievements, and profile details.
+explicit enough, omit that structured record but still extract all other supported evidence from it,
+such as skills, qualifications, clients, sectors, responsibilities, achievements, and useful profile
+details. For service attestations, employment certificates, reference letters, or similar evidence
+that clearly confirms an employer, role, responsibilities, or service period but lacks a full start
+date, preserve those supported facts in profile.summary and professional_title where appropriate.
+Never invent an exact date merely to create an employment or project record.
 """
 
 
@@ -277,7 +285,17 @@ class ProfileAIService:
         await self.session.commit()
 
         try:
+            if is_temporary_document_filename(document.original_filename):
+                raise UnsupportedAnalysisDocument(
+                    "This is an Office temporary file, not the original document. "
+                    "Delete it and upload the original Word document instead."
+                )
+
             content = await self.storage.read(document.storage_key)
+            if not content:
+                raise UnsupportedAnalysisDocument(
+                    "This document is empty (0 KB). Delete it and upload the original file."
+                )
             extension = document.file_extension.lower()
 
             text: str | None = None
@@ -333,6 +351,21 @@ class ProfileAIService:
         except HTTPException:
             await self.session.rollback()
             raise
+
+        except DocumentTextRecoveryUnavailable as exc:
+            logger.warning(
+                "Document text recovery unavailable: person_id=%s document_id=%s error=%s",
+                person_id,
+                document_id,
+                str(exc),
+            )
+            await self.session.rollback()
+            message = str(exc)
+            await self._mark_analysis_failed(document_id, message)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=message,
+            ) from exc
 
         except GeminiTemporarilyUnavailable as exc:
             logger.warning(
@@ -438,10 +471,10 @@ class ProfileAIService:
         if not self._has_usable_fallback_text(fallback_text):
             fallback_text = await self._recover_image_text(document, content)
         if not fallback_text:
-            raise GeminiTemporarilyUnavailable(
-                "The document appears image-based and configured fallback providers could not "
-                "recover readable text. Your document is safe; retry when a multimodal provider "
-                "is available."
+            raise DocumentTextRecoveryUnavailable(
+                "AI could not recover readable text from this scanned or image-based document. "
+                "The file is safe. Try a clearer scan or a text-searchable PDF, then analyze "
+                "it again."
             ) from gemini_error
 
         chunks = self._chunk_fallback_text(fallback_text)
@@ -501,41 +534,11 @@ class ProfileAIService:
             mime_type = GEMINI_MEDIA_TYPES.get(extension, "image/jpeg")
             images.append((content, mime_type, document.original_filename))
         elif extension == ".pdf":
-            try:
-                reader = PdfReader(BytesIO(content))
-                for page_number, page in enumerate(reader.pages, start=1):
-                    for image_number, image in enumerate(page.images, start=1):
-                        image_data = image.data
-                        if not image_data or len(image_data) > 12 * 1024 * 1024:
-                            continue
-                        name = (image.name or "image.jpg").lower()
-                        if name.endswith(".png"):
-                            mime_type = "image/png"
-                        elif name.endswith(".webp"):
-                            mime_type = "image/webp"
-                        else:
-                            mime_type = "image/jpeg"
-                        images.append(
-                            (
-                                image_data,
-                                mime_type,
-                                (
-                                    f"{document.original_filename} page {page_number} "
-                                    f"image {image_number}"
-                                ),
-                            )
-                        )
-                        if len(images) >= 20:
-                            break
-                    if len(images) >= 20:
-                        break
-            except Exception as exc:
-                logger.warning("Scanned PDF image extraction failed: %s", str(exc))
-                return None
+            images = self._render_pdf_pages(document.original_filename, content)
 
         if not images:
             logger.warning(
-                "No recoverable images found for multimodal fallback: file=%s extension=%s",
+                "No page images could be rendered for multimodal fallback: file=%s extension=%s",
                 document.original_filename,
                 extension,
             )
@@ -543,6 +546,7 @@ class ProfileAIService:
 
         recovered: list[str] = []
         providers: list[str] = []
+        provider_failures: list[str] = []
         for image_data, mime_type, label in images:
             try:
                 text, provider = await self.fallback_ai.extract_image_text(
@@ -554,23 +558,94 @@ class ProfileAIService:
                     recovered.append(f"[{label}]\n{text.strip()}")
                     providers.append(provider)
             except AllAIProvidersUnavailable as exc:
+                provider_failures.append(str(exc))
                 logger.warning(
-                    "Multimodal fallback unavailable for image: label=%s error=%s",
+                    "Multimodal fallback unavailable for page image: label=%s error=%s",
                     label,
                     str(exc),
                 )
-                continue
 
         combined = "\n\n".join(recovered).strip()
         if combined:
             logger.info(
-                "Recovered image-based document text: file=%s images=%s providers=%s",
+                "Recovered image-based document text: file=%s pages=%s providers=%s",
                 document.original_filename,
                 len(recovered),
                 providers,
             )
             return combined[: self.settings.ai_max_document_chars]
+
+        if provider_failures:
+            raise GeminiTemporarilyUnavailable(
+                "Configured multimodal AI providers could not read the rendered document pages"
+            )
         return None
+
+    def _render_pdf_pages(
+        self,
+        filename: str,
+        content: bytes,
+    ) -> list[tuple[bytes, str, str]]:
+        images: list[tuple[bytes, str, str]] = []
+        try:
+            with pymupdf.open(stream=content, filetype="pdf") as pdf:  # type: ignore[no-untyped-call]
+                if pdf.page_count == 0:
+                    return images
+
+                max_pages = min(pdf.page_count, self.settings.ai_pdf_vision_max_pages)
+                if pdf.page_count > max_pages:
+                    logger.info(
+                        "PDF vision fallback capped pages: file=%s total_pages=%s max_pages=%s",
+                        filename,
+                        pdf.page_count,
+                        max_pages,
+                    )
+
+                zoom = self.settings.ai_pdf_render_dpi / 72.0
+                matrix = pymupdf.Matrix(zoom, zoom) # type: ignore[no-untyped-call]
+                for page_index in range(max_pages):
+                    page = pdf.load_page(page_index)
+                    pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                    image_data = pixmap.tobytes("jpeg", jpg_quality=85)
+
+                    # Keep individual vision requests bounded. If a complex page is still
+                    # unusually large, re-render at a lower resolution before sending it.
+                    if len(image_data) > 10 * 1024 * 1024:
+                        reduced = pymupdf.Matrix(1.5, 1.5) # type: ignore[no-untyped-call]
+                        pixmap = page.get_pixmap(matrix=reduced, alpha=False)
+                        image_data = pixmap.tobytes("jpeg", jpg_quality=78)
+
+                    if not image_data or len(image_data) > 12 * 1024 * 1024:
+                        logger.warning(
+                            "Skipping oversized rendered PDF page: file=%s page=%s bytes=%s",
+                            filename,
+                            page_index + 1,
+                            len(image_data),
+                        )
+                        continue
+
+                    images.append(
+                        (
+                            image_data,
+                            "image/jpeg",
+                            f"{filename} page {page_index + 1}",
+                        )
+                    )
+        except Exception as exc:
+            logger.warning(
+                "PDF page rendering failed: file=%s error=%s",
+                filename,
+                str(exc),
+            )
+            return []
+
+        logger.info(
+            "Rendered PDF pages for multimodal fallback: file=%s pages=%s dpi=%s",
+            filename,
+            len(images),
+            self.settings.ai_pdf_render_dpi,
+        )
+        return images
 
 
     @staticmethod
@@ -684,7 +759,7 @@ class ProfileAIService:
                 continue
             if key == "confidence":
                 try:
-                    merged[key] = max(float(current), float(value))
+                    merged[key] = max(current, value)
                 except (TypeError, ValueError):
                     pass
             elif isinstance(value, str) and isinstance(current, str) and len(value) > len(current):
@@ -1359,3 +1434,6 @@ class ProfileAIService:
             )
         )
         return int(value or 0)
+
+
+

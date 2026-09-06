@@ -85,6 +85,12 @@ class DocumentStorage(Protocol):
     ) -> None: ...
 
 
+def is_temporary_document_filename(filename: str) -> bool:
+    cleaned = filename.replace("\\", "/").split("/")[-1].strip()
+    lowered = cleaned.lower()
+    return cleaned.startswith("~$") or lowered.startswith(".~lock.")
+
+
 def sanitize_filename(
     filename: str | None,
 ) -> str:
@@ -96,6 +102,12 @@ def sanitize_filename(
 
     if not cleaned:
         raise InvalidDocumentFile("The uploaded file must have a filename")
+
+    if is_temporary_document_filename(cleaned):
+        raise InvalidDocumentFile(
+            "This appears to be a Microsoft Office or LibreOffice temporary file. "
+            "Please upload the original document instead."
+        )
 
     if len(cleaned) > 500:
         raise InvalidDocumentFile("The filename is too long")
