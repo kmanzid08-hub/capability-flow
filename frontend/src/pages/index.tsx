@@ -3257,6 +3257,36 @@ function normalizeSuggestionPayload(
   return result;
 }
 
+function isCompleteIsoDate(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return true;
+  if (typeof value !== "string") return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function suggestionValidationHint(suggestion: ProfileSuggestion): string | null {
+  const payload = suggestion.payload;
+
+  if (suggestion.category === "employment" || suggestion.category === "project") {
+    const startDate = payload.start_date;
+    if (!isCompleteIsoDate(startDate) || startDate === null || startDate === undefined || startDate === "") {
+      return "A complete start date is required before this record can be saved. Use Edit before accepting and enter the exact YYYY-MM-DD date from the supporting evidence; do not guess missing precision.";
+    }
+    if (!isCompleteIsoDate(payload.end_date)) {
+      return "The end date is incomplete or invalid. Use Edit before accepting and enter YYYY-MM-DD from the supporting evidence, or leave it blank if the document does not state an end date.";
+    }
+  }
+
+  if (suggestion.category === "certification") {
+    if (!isCompleteIsoDate(payload.issue_date) || !isCompleteIsoDate(payload.expiry_date)) {
+      return "One of the certification dates is incomplete or invalid. Enter a full YYYY-MM-DD date from the evidence, or leave the optional date blank.";
+    }
+  }
+
+  return null;
+}
+
 function DocumentsPanel({ personId }: { personId: string }) {
   const queryClient = useQueryClient();
   const [files, setFiles] = React.useState<File[]>([]);
@@ -3806,6 +3836,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
               const isEditing = editingId === suggestion.id;
               const source = documentById.get(suggestion.source_document_id);
               const fields = suggestionFields[suggestion.category];
+              const validationHint = suggestionValidationHint(suggestion);
 
               return (
                 <article
@@ -3835,6 +3866,12 @@ function DocumentsPanel({ personId }: { personId: string }) {
                   </div>
 
                   <div className="p-5">
+                    {validationHint && !isEditing && (
+                      <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+                        <p className="font-semibold">Review required before saving</p>
+                        <p className="mt-1">{validationHint}</p>
+                      </div>
+                    )}
                     {isEditing ? (
                       <div className="grid gap-4 md:grid-cols-2">
                         {fields.map((field) => {
@@ -3903,13 +3940,14 @@ function DocumentsPanel({ personId }: { personId: string }) {
                             <label key={field.key} className="text-sm font-medium text-slate-700">
                               {field.label}
                               <input
-                                type={field.kind === "date" ? "date" : field.kind === "number" ? "number" : "text"}
+                                type={field.kind === "number" ? "number" : "text"}
                                 value={value == null ? "" : String(value)}
                                 onChange={(event) =>
                                   updateEditValue(field.key, event.target.value)
                                 }
                                 className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen"
-                                placeholder={field.placeholder}
+                                placeholder={field.kind === "date" ? "YYYY-MM-DD" : field.placeholder}
+                                inputMode={field.kind === "date" ? "numeric" : undefined}
                               />
                             </label>
                           );
@@ -3975,7 +4013,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
                         <>
                           <Button
                             type="button"
-                            disabled={reviewBusy}
+                            disabled={reviewBusy || Boolean(validationHint)}
                             onClick={() => accept.mutate(suggestion)}
                           >
                             <Check size={15} className="mr-2 inline" />

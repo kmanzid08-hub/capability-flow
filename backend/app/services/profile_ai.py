@@ -1,7 +1,8 @@
 ﻿import asyncio
 import logging
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any
 
@@ -972,6 +973,11 @@ class ProfileAIService:
                 if not isinstance(item, dict):
                     continue
                 payload = dict(item)
+                if category in {"employment", "project"}:
+                    payload = self._normalize_experience_payload(payload, category)
+                elif category == "certification":
+                    payload["issue_date"] = self._normalize_date_value(payload.get("issue_date"))
+                    payload["expiry_date"] = self._normalize_date_value(payload.get("expiry_date"))
                 confidence_value = payload.pop("confidence", None)
                 confidence = (
                     float(confidence_value) if isinstance(confidence_value, (int, float)) else None
@@ -1091,7 +1097,7 @@ class ProfileAIService:
             await self.session.rollback()
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=exc.errors(),
+                detail=self._format_validation_error(exc),
             ) from exc
         except HTTPException:
             await self.session.rollback()
@@ -1182,6 +1188,120 @@ class ProfileAIService:
             "failures": failures,
         }
 
+    @staticmethod
+    def _normalize_date_value(value: Any) -> Any:
+        """Normalize only dates that are already explicit; never invent missing precision."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if not isinstance(value, str):
+            return value
+
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ].*)?", cleaned):
+            explicit_date = cleaned[:10]
+            try:
+                date.fromisoformat(explicit_date)
+            except ValueError:
+                return cleaned
+            return explicit_date
+
+        # Partial dates such as 2020, 2020-05, or Jan 2020 are deliberately
+        # retained unchanged so validation can send the item to human review.
+        return cleaned
+
+    @classmethod
+    def _normalize_experience_payload(
+        cls,
+        payload: dict[str, Any],
+        category: str,
+    ) -> dict[str, Any]:
+        normalized = dict(payload)
+        normalized["start_date"] = cls._normalize_date_value(normalized.get("start_date"))
+        normalized["end_date"] = cls._normalize_date_value(normalized.get("end_date"))
+
+        if normalized.get("end_date") is not None and normalized.get("is_current") is True:
+            normalized["is_current"] = False
+
+        if category == "employment":
+            raw_type = normalized.get("employment_type")
+            if isinstance(raw_type, str):
+                canonical = re.sub(r"[\s-]+", "_", raw_type.strip().lower())
+                allowed = {
+                    "full_time",
+                    "part_time",
+                    "contract",
+                    "consulting",
+                    "temporary",
+                    "internship",
+                    "volunteer",
+                    "other",
+                }
+                normalized["employment_type"] = canonical if canonical in allowed else None
+
+        return normalized
+
+    @staticmethod
+    def _format_validation_error(exc: ValidationError) -> str:
+        """Turn Pydantic errors into review instructions that are useful in the UI."""
+        labels = {
+            "start_date": "Start date",
+            "end_date": "End date",
+            "issue_date": "Issue date",
+            "expiry_date": "Expiry date",
+            "employer_name": "Employer",
+            "job_title": "Job title",
+            "project_name": "Project name",
+            "role": "Role",
+            "institution": "Institution",
+            "name": "Name",
+        }
+        messages: list[str] = []
+
+        for error in exc.errors():
+            loc = error.get("loc") or ()
+            field = str(loc[-1]) if loc else ""
+            label = labels.get(field, field.replace("_", " ").title() if field else "Record")
+            input_value = error.get("input")
+            message = str(error.get("msg") or "Invalid value")
+
+            if field in {"start_date", "end_date", "issue_date", "expiry_date"}:
+                shown = f" '{input_value}'" if input_value not in (None, "") else ""
+                if field == "start_date":
+                    rendered = (
+                        f"{label}{shown} is not a complete valid date. "
+                        "Open Edit before accepting and enter the exact date as YYYY-MM-DD "
+                        "from the supporting evidence. Do not guess a day or month."
+                    )
+                else:
+                    rendered = (
+                        f"{label}{shown} is not a complete valid date. "
+                        "Enter YYYY-MM-DD from the supporting evidence, or leave it blank "
+                        "when the date is genuinely not stated."
+                    )
+            elif "End date cannot be earlier than start date" in message:
+                rendered = (
+                    "End date is earlier than start date. Review the source document and "
+                    "correct the two dates before accepting."
+                )
+            elif "Current employment cannot have an end date" in message:
+                rendered = "Current employment cannot also have an end date. Review the dates."
+            elif "Current project cannot have an end date" in message:
+                rendered = "An ongoing project cannot also have an end date. Review the dates."
+            else:
+                rendered = f"{label}: {message}. Edit this suggestion before accepting."
+
+            if rendered not in messages:
+                messages.append(rendered)
+
+        return " ".join(messages) or "This suggestion needs manual review before it can be saved."
+
     async def _ensure_evidence_link(
         self,
         person_id: uuid.UUID,
@@ -1220,20 +1340,21 @@ class ProfileAIService:
         payload = dict(suggestion.payload)
 
         if suggestion.category in {"employment", "project"}:
-            end_date = payload.get("end_date")
-            if end_date == "":
-                payload["end_date"] = None
-                end_date = None
-            if end_date is not None and payload.get("is_current") is True:
-                payload["is_current"] = False
-                suggestion.payload = payload
-                logger.info(
-                    "Normalized AI suggestion with end date marked current: "
+            payload = self._normalize_experience_payload(payload, suggestion.category)
+            suggestion.payload = payload
+
+            if payload.get("end_date") is not None and payload.get("is_current") is False:
+                logger.debug(
+                    "Normalized AI experience suggestion before validation: "
                     "person_id=%s suggestion_id=%s category=%s",
                     person_id,
                     suggestion.id,
                     suggestion.category,
                 )
+        elif suggestion.category == "certification":
+            payload["issue_date"] = self._normalize_date_value(payload.get("issue_date"))
+            payload["expiry_date"] = self._normalize_date_value(payload.get("expiry_date"))
+            suggestion.payload = payload
 
         if suggestion.category == "profile":
             person = await self.people.get(person_id)
@@ -1434,6 +1555,3 @@ class ProfileAIService:
             )
         )
         return int(value or 0)
-
-
-
