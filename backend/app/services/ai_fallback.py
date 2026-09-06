@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from typing import Any
@@ -31,6 +32,144 @@ class FallbackAI:
     @property
     def configured(self) -> bool:
         return bool(self.settings.groq_api_key or self.settings.openrouter_api_key)
+
+    @staticmethod
+    def _is_hard_rate_limit(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        message = str(exc).lower()
+        return status_code == 429 or any(
+            token in message
+            for token in (
+                "rate limit",
+                "rate_limit",
+                "tokens per minute",
+                "tpm",
+                "quota",
+                "too many requests",
+            )
+        )
+
+    async def extract_image_text(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        label: str,
+    ) -> tuple[str, str]:
+        """Recover visible document text from an image using configured multimodal fallbacks."""
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime_type};base64,{encoded}"
+        prompt = (
+            "Transcribe all readable text from this professional document image. "
+            "Preserve names, dates, qualifications, employers, project names, roles, "
+            "certifications, tables, and headings. Do not summarize or invent text. "
+            f"Image label: {label}."
+        )
+        errors: list[str] = []
+
+        if self.settings.openrouter_api_key:
+            try:
+                model = self.settings.openrouter_model.strip() or "openrouter/free"
+                client = AsyncOpenAI(
+                    api_key=self.settings.openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    timeout=180.0,
+                    max_retries=1,
+                    default_headers={
+                        "HTTP-Referer": "https://capability-flow.onrender.com",
+                        "X-Title": "Capability Flow",
+                    },
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": data_url},
+                                },
+                            ],
+                        }
+                    ],
+                    temperature=0.0,
+                    max_tokens=3000,
+                )
+                text = self._decode_text_response(response)
+                logger.info(
+                    "Image text recovery succeeded: provider=openrouter model=%s label=%s",
+                    model,
+                    label,
+                )
+                return text, f"openrouter:{model}:vision"
+            except Exception as exc:
+                logger.warning(
+                    "OpenRouter image text recovery failed: label=%s error=%s",
+                    label,
+                    str(exc),
+                )
+                errors.append(f"openrouter: {type(exc).__name__}")
+
+        if self.settings.groq_api_key:
+            try:
+                client = AsyncOpenAI(
+                    api_key=self.settings.groq_api_key,
+                    base_url="https://api.groq.com/openai/v1",
+                    timeout=150.0,
+                    max_retries=1,
+                )
+                models = await client.models.list()
+                vision_models = [
+                    item.id
+                    for item in models.data
+                    if any(token in item.id.lower() for token in ("vision", "scout", "maverick"))
+                ]
+                if not vision_models:
+                    raise ValueError("Groq exposes no multimodal model")
+                last_error: Exception | None = None
+                for model in vision_models[:3]:
+                    try:
+                        response = await client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {"url": data_url},
+                                        },
+                                    ],
+                                }
+                            ],
+                            temperature=0.0,
+                            max_tokens=3000,
+                        )
+                        text = self._decode_text_response(response)
+                        logger.info(
+                            "Image text recovery succeeded: provider=groq model=%s label=%s",
+                            model,
+                            label,
+                        )
+                        return text, f"groq:{model}:vision"
+                    except Exception as exc:
+                        last_error = exc
+                if last_error is not None:
+                    raise last_error
+            except Exception as exc:
+                logger.warning(
+                    "Groq image text recovery failed: label=%s error=%s",
+                    label,
+                    str(exc),
+                )
+                errors.append(f"groq: {type(exc).__name__}")
+
+        if not errors:
+            raise AllAIProvidersUnavailable("No multimodal fallback provider is configured")
+        raise AllAIProvidersUnavailable("; ".join(errors))
 
     async def generate_json(
         self,
@@ -137,6 +276,11 @@ class FallbackAI:
             except Exception as exc:
                 logger.warning("Groq model failed: model=%s error=%s", model, str(exc))
                 errors.append(f"{model}: {type(exc).__name__}")
+                if self._is_hard_rate_limit(exc):
+                    logger.warning(
+                        "Groq hard quota/rate limit detected; switching immediately to OpenRouter"
+                    )
+                    break
 
         raise AllAIProvidersUnavailable("Groq models failed: " + "; ".join(errors))
 
@@ -269,6 +413,15 @@ class FallbackAI:
         return self._decode_response(response)
 
     @staticmethod
+    def _decode_text_response(response: Any) -> str:
+        if not getattr(response, "choices", None):
+            raise ValueError("provider returned no choices")
+        content = response.choices[0].message.content
+        if not content or not str(content).strip():
+            raise ValueError("provider returned empty text output")
+        return str(content).strip()
+
+    @staticmethod
     def _decode_response(response: Any) -> dict[str, Any]:
         if not getattr(response, "choices", None):
             raise ValueError("provider returned no choices")
@@ -294,4 +447,3 @@ class FallbackAI:
         if not isinstance(data, dict):
             raise ValueError("provider did not return a JSON object")
         return data
-

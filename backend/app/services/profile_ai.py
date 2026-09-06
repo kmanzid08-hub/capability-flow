@@ -435,9 +435,13 @@ class ProfileAIService:
             except Exception as exc:
                 logger.warning("PDF fallback text extraction failed: %s", str(exc))
                 fallback_text = None
+        if not self._has_usable_fallback_text(fallback_text):
+            fallback_text = await self._recover_image_text(document, content)
         if not fallback_text:
             raise GeminiTemporarilyUnavailable(
-                "Gemini failed and this document cannot be converted to text for fallback analysis"
+                "The document appears image-based and configured fallback providers could not "
+                "recover readable text. Your document is safe; retry when a multimodal provider "
+                "is available."
             ) from gemini_error
 
         chunks = self._chunk_fallback_text(fallback_text)
@@ -460,7 +464,7 @@ class ProfileAIService:
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     schema=AIProfileExtraction.model_json_schema(),
-                    max_tokens=3500,
+                    max_tokens=2200,
                 )
                 parsed = AIProfileExtraction.model_validate(data)
                 results.append(parsed.model_dump(mode="json"))
@@ -485,6 +489,100 @@ class ProfileAIService:
                 "All configured AI providers are temporarily unavailable"
             ) from exc
 
+    async def _recover_image_text(
+        self,
+        document: PersonDocument,
+        content: bytes,
+    ) -> str | None:
+        extension = document.file_extension.lower()
+        images: list[tuple[bytes, str, str]] = []
+
+        if extension in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            mime_type = GEMINI_MEDIA_TYPES.get(extension, "image/jpeg")
+            images.append((content, mime_type, document.original_filename))
+        elif extension == ".pdf":
+            try:
+                reader = PdfReader(BytesIO(content))
+                for page_number, page in enumerate(reader.pages, start=1):
+                    for image_number, image in enumerate(page.images, start=1):
+                        image_data = image.data
+                        if not image_data or len(image_data) > 12 * 1024 * 1024:
+                            continue
+                        name = (image.name or "image.jpg").lower()
+                        if name.endswith(".png"):
+                            mime_type = "image/png"
+                        elif name.endswith(".webp"):
+                            mime_type = "image/webp"
+                        else:
+                            mime_type = "image/jpeg"
+                        images.append(
+                            (
+                                image_data,
+                                mime_type,
+                                (
+                                    f"{document.original_filename} page {page_number} "
+                                    f"image {image_number}"
+                                ),
+                            )
+                        )
+                        if len(images) >= 20:
+                            break
+                    if len(images) >= 20:
+                        break
+            except Exception as exc:
+                logger.warning("Scanned PDF image extraction failed: %s", str(exc))
+                return None
+
+        if not images:
+            logger.warning(
+                "No recoverable images found for multimodal fallback: file=%s extension=%s",
+                document.original_filename,
+                extension,
+            )
+            return None
+
+        recovered: list[str] = []
+        providers: list[str] = []
+        for image_data, mime_type, label in images:
+            try:
+                text, provider = await self.fallback_ai.extract_image_text(
+                    image_bytes=image_data,
+                    mime_type=mime_type,
+                    label=label,
+                )
+                if text.strip():
+                    recovered.append(f"[{label}]\n{text.strip()}")
+                    providers.append(provider)
+            except AllAIProvidersUnavailable as exc:
+                logger.warning(
+                    "Multimodal fallback unavailable for image: label=%s error=%s",
+                    label,
+                    str(exc),
+                )
+                continue
+
+        combined = "\n\n".join(recovered).strip()
+        if combined:
+            logger.info(
+                "Recovered image-based document text: file=%s images=%s providers=%s",
+                document.original_filename,
+                len(recovered),
+                providers,
+            )
+            return combined[: self.settings.ai_max_document_chars]
+        return None
+
+
+    @staticmethod
+    def _has_usable_fallback_text(text: str | None) -> bool:
+        if not text:
+            return False
+        normalized = " ".join(text.split())
+        if len(normalized) < 120:
+            return False
+        alnum = sum(ch.isalnum() for ch in normalized)
+        return alnum >= 80
+
     @staticmethod
     def _is_hard_gemini_quota_error(exc: Exception) -> bool:
         message = str(exc).lower()
@@ -495,7 +593,7 @@ class ProfileAIService:
         )
 
     @staticmethod
-    def _chunk_fallback_text(text: str, max_chars: int = 14000) -> list[str]:
+    def _chunk_fallback_text(text: str, max_chars: int = 8500) -> list[str]:
         text = text.strip()
         if len(text) <= max_chars:
             return [text]
@@ -514,8 +612,8 @@ class ProfileAIService:
             start = max(start + 1, end - overlap)
         return [chunk for chunk in chunks if chunk]
 
-    @staticmethod
-    def _merge_extractions(results: list[dict[str, Any]]) -> dict[str, Any]:
+    @classmethod
+    def _merge_extractions(cls, results: list[dict[str, Any]]) -> dict[str, Any]:
         merged: dict[str, Any] = {
             "profile": {
                 "summary": None,
@@ -532,18 +630,65 @@ class ProfileAIService:
         for result in results:
             profile = result.get("profile") or {}
             for key in merged["profile"]:
-                if not merged["profile"][key] and profile.get(key):
-                    merged["profile"][key] = profile[key]
+                candidate = profile.get(key)
+                current = merged["profile"].get(key)
+                if candidate and (not current or len(str(candidate)) > len(str(current))):
+                    merged["profile"][key] = candidate
+
             for category in ("skills", "education", "certifications", "employment", "projects"):
-                existing = {
-                    json.dumps(item, sort_keys=True, default=str).lower()
-                    for item in merged[category]
-                }
                 for item in result.get(category) or []:
-                    marker = json.dumps(item, sort_keys=True, default=str).lower()
-                    if marker not in existing:
-                        merged[category].append(item)
-                        existing.add(marker)
+                    if not isinstance(item, dict):
+                        continue
+                    marker = cls._dedupe_key(category, item)
+                    existing_index = next(
+                        (
+                            i
+                            for i, existing in enumerate(merged[category])
+                            if cls._dedupe_key(category, existing) == marker
+                        ),
+                        None,
+                    )
+                    if existing_index is None:
+                        merged[category].append(dict(item))
+                    else:
+                        merged[category][existing_index] = cls._merge_item(
+                            merged[category][existing_index],
+                            item,
+                        )
+        return merged
+
+    @staticmethod
+    def _normalize_key(value: Any) -> str:
+        return " ".join(str(value or "").lower().split())
+
+    @classmethod
+    def _dedupe_key(cls, category: str, item: dict[str, Any]) -> tuple[str, ...]:
+        fields = {
+            "skills": ("name",),
+            "education": ("institution", "degree_name", "field_of_study", "graduation_year"),
+            "certifications": ("name", "issuer", "issue_date"),
+            "employment": ("employer_name", "job_title", "start_date", "end_date"),
+            "projects": ("project_name", "client_name", "role", "start_date"),
+        }[category]
+        return tuple(cls._normalize_key(item.get(field)) for field in fields)
+
+    @staticmethod
+    def _merge_item(existing: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(existing)
+        for key, value in candidate.items():
+            if value in (None, "", [], {}):
+                continue
+            current = merged.get(key)
+            if current in (None, "", [], {}):
+                merged[key] = value
+                continue
+            if key == "confidence":
+                try:
+                    merged[key] = max(float(current), float(value))
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(value, str) and isinstance(current, str) and len(value) > len(current):
+                merged[key] = value
         return merged
 
     async def _call_gemini(
