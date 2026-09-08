@@ -14,6 +14,10 @@ class AllAIProvidersUnavailable(RuntimeError):
     pass
 
 
+class AIOutputTruncated(RuntimeError):
+    pass
+
+
 class FallbackAI:
     GROQ_MODELS = (
         "openai/gpt-oss-20b",
@@ -250,9 +254,9 @@ class FallbackAI:
         schema: dict[str, Any],
         max_tokens: int,
     ) -> tuple[dict[str, Any], str]:
-        # Free fallback tiers commonly enforce tight TPM limits. Keep output bounded;
-        # callers should chunk large source text rather than sending oversized requests.
-        max_tokens = min(max_tokens, 3500)
+        # Keep the free providers tightly bounded. OpenAI Luna is the paid safety net
+        # and receives a larger ceiling only after the free providers are exhausted.
+        free_max_tokens = min(max_tokens, 3500)
         errors: list[str] = []
 
         if self.settings.groq_api_key:
@@ -261,7 +265,7 @@ class FallbackAI:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     schema=schema,
-                    max_tokens=max_tokens,
+                    max_tokens=free_max_tokens,
                 )
             except Exception as exc:
                 logger.warning(
@@ -276,7 +280,7 @@ class FallbackAI:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     schema=schema,
-                    max_tokens=max_tokens,
+                    max_tokens=free_max_tokens,
                 )
             except Exception as exc:
                 logger.warning(
@@ -322,29 +326,55 @@ class FallbackAI:
             timeout=180.0,
             max_retries=1,
         )
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "developer", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "capability_flow_result",
-                    "strict": False,
-                    "schema": schema,
-                },
-            },
-            reasoning_effort="none",
-            max_completion_tokens=max_tokens,
-        )
-        data = self._decode_response(response)
-        logger.info(
-            "AI fallback succeeded with provider=openai model=%s",
-            model,
-        )
-        return data, f"openai:{model}"
+
+        # Luna is only reached after the free providers fail. Give structured output
+        # enough room to close the JSON object, and retry once if the first response
+        # is explicitly length-limited or arrives as truncated JSON.
+        initial_limit = max(max_tokens, 6000)
+        retry_limit = max(initial_limit * 2, 12000)
+        token_limits = (initial_limit, retry_limit)
+
+        for attempt, token_limit in enumerate(token_limits, start=1):
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "developer", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "capability_flow_result",
+                            "strict": False,
+                            "schema": schema,
+                        },
+                    },
+                    reasoning_effort="none",
+                    max_completion_tokens=token_limit,
+                )
+                data = self._decode_response(response)
+                logger.info(
+                    "AI fallback succeeded with provider=openai model=%s "
+                    "attempt=%s max_completion_tokens=%s",
+                    model,
+                    attempt,
+                    token_limit,
+                )
+                return data, f"openai:{model}"
+            except (AIOutputTruncated, json.JSONDecodeError) as exc:
+                if attempt >= len(token_limits):
+                    raise
+                logger.warning(
+                    "OpenAI structured output was incomplete; retrying once with "
+                    "a larger output budget: model=%s next_max_completion_tokens=%s "
+                    "error=%s",
+                    model,
+                    retry_limit,
+                    str(exc),
+                )
+
+        raise AllAIProvidersUnavailable("OpenAI did not return usable structured output")
 
     async def _generate_groq(
         self,
@@ -560,7 +590,14 @@ class FallbackAI:
         if not getattr(response, "choices", None):
             raise ValueError("provider returned no choices")
 
-        message = response.choices[0].message
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason in {"length", "max_tokens"}:
+            raise AIOutputTruncated(
+                "provider stopped because the output token limit was reached"
+            )
+
+        message = choice.message
         content = message.content
         if not content or not str(content).strip():
             refusal = getattr(message, "refusal", None)
@@ -581,4 +618,3 @@ class FallbackAI:
         if not isinstance(data, dict):
             raise ValueError("provider did not return a JSON object")
         return data
-

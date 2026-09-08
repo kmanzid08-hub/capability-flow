@@ -43,6 +43,52 @@ TEXT_EXTRACTABLE_EXTENSIONS = {
 GEMINI_NATIVE_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
+EMBEDDED_IMAGE_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def extract_embedded_document_images(
+    content: bytes,
+    extension: str,
+    max_images: int,
+) -> list[tuple[bytes, str, str]]:
+    """Extract supported embedded images from OOXML documents without rendering them."""
+    if extension.lower() != ".docx":
+        return []
+
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            candidates: list[tuple[int, str, str]] = []
+            for info in archive.infolist():
+                name = info.filename.replace("\\", "/")
+                lower_name = name.lower()
+                if not lower_name.startswith("word/media/") or info.file_size <= 0:
+                    continue
+
+                suffix = "." + lower_name.rsplit(".", 1)[-1] if "." in lower_name else ""
+                mime_type = EMBEDDED_IMAGE_MEDIA_TYPES.get(suffix)
+                if mime_type is None or info.file_size > 12 * 1024 * 1024:
+                    continue
+                candidates.append((info.file_size, name, mime_type))
+
+            # Full-page scans are normally much larger than logos/icons, so prioritize
+            # the largest images when a DOCX contains more media than our vision cap.
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            images: list[tuple[bytes, str, str]] = []
+            for _, name, mime_type in candidates[:max_images]:
+                image_data = archive.read(name)
+                if image_data:
+                    images.append((image_data, mime_type, name.rsplit("/", 1)[-1]))
+            return images
+    except zipfile.BadZipFile:
+        return []
+
+
 def is_gemini_native_document(extension: str) -> bool:
     return extension.lower() in GEMINI_NATIVE_EXTENSIONS
 

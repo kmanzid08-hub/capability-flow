@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.6-luna"
     ai_max_document_chars: int = Field(default=120_000, ge=10_000, le=500_000)
     ai_pdf_vision_max_pages: int = Field(default=20, ge=1, le=50)
+    ai_docx_vision_max_images: int = Field(default=20, ge=1, le=50)
     ai_pdf_render_dpi: int = Field(default=144, ge=96, le=220)
 
     model_config = SettingsConfigDict(

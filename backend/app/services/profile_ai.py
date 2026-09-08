@@ -30,6 +30,7 @@ from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
 from app.services.document_storage import create_document_storage, is_temporary_document_filename
 from app.services.document_text import (
     UnsupportedAnalysisDocument,
+    extract_embedded_document_images,
     extract_text,
     is_gemini_native_document,
 )
@@ -301,11 +302,21 @@ class ProfileAIService:
 
             text: str | None = None
             if not is_gemini_native_document(extension):
-                text = extract_text(
-                    content,
-                    extension,
-                    self.settings.ai_max_document_chars,
-                )
+                try:
+                    text = extract_text(
+                        content,
+                        extension,
+                        self.settings.ai_max_document_chars,
+                    )
+                except UnsupportedAnalysisDocument as exc:
+                    if extension == ".docx" and "No readable text was found" in str(exc):
+                        logger.info(
+                            "DOCX has no local text; attempting embedded-image recovery: file=%s",
+                            document.original_filename,
+                        )
+                        text = None
+                    else:
+                        raise
 
             result = await self._call_ai(
                 person=person,
@@ -536,6 +547,22 @@ class ProfileAIService:
             images.append((content, mime_type, document.original_filename))
         elif extension == ".pdf":
             images = self._render_pdf_pages(document.original_filename, content)
+        elif extension == ".docx":
+            embedded = extract_embedded_document_images(
+                content,
+                extension,
+                self.settings.ai_docx_vision_max_images,
+            )
+            images = [
+                (image_data, mime_type, f"{document.original_filename} {label}")
+                for image_data, mime_type, label in embedded
+            ]
+            if images:
+                logger.info(
+                    "Extracted DOCX images for multimodal fallback: file=%s images=%s",
+                    document.original_filename,
+                    len(images),
+                )
 
         if not images:
             logger.warning(
