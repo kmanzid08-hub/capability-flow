@@ -24,14 +24,19 @@ class FallbackAI:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         logger.info(
-            "AI fallback configuration: groq=%s openrouter=%s",
+            "AI fallback configuration: groq=%s openrouter=%s openai=%s",
             bool(self.settings.groq_api_key),
             bool(self.settings.openrouter_api_key),
+            bool(self.settings.openai_api_key),
         )
 
     @property
     def configured(self) -> bool:
-        return bool(self.settings.groq_api_key or self.settings.openrouter_api_key)
+        return bool(
+            self.settings.groq_api_key
+            or self.settings.openrouter_api_key
+            or self.settings.openai_api_key
+        )
 
     @staticmethod
     def _is_hard_rate_limit(exc: Exception) -> bool:
@@ -172,9 +177,70 @@ class FallbackAI:
                 )
                 errors.append(f"groq: {type(exc).__name__}")
 
+        if self.settings.openai_api_key:
+            try:
+                return await self._extract_image_text_openai(
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                    label=label,
+                    prompt=prompt,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "OpenAI image text recovery failed: label=%s error=%s",
+                    label,
+                    str(exc),
+                )
+                errors.append(f"openai: {type(exc).__name__}")
+
         if not errors:
             raise AllAIProvidersUnavailable("No multimodal fallback provider is configured")
         raise AllAIProvidersUnavailable("; ".join(errors))
+
+    async def _extract_image_text_openai(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        label: str,
+        prompt: str,
+    ) -> tuple[str, str]:
+        key = self.settings.openai_api_key
+        if not key:
+            raise AllAIProvidersUnavailable("OpenAI is not configured")
+
+        model = self.settings.openai_model.strip() or "gpt-5.6-luna"
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime_type};base64,{encoded}"
+        client = AsyncOpenAI(
+            api_key=key,
+            timeout=180.0,
+            max_retries=1,
+        )
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        },
+                    ],
+                }
+            ],
+            reasoning_effort="none",
+            max_completion_tokens=3000,
+        )
+        text = self._decode_text_response(response)
+        logger.info(
+            "Image text recovery succeeded: provider=openai model=%s label=%s",
+            model,
+            label,
+        )
+        return text, f"openai:{model}:vision"
 
     async def generate_json(
         self,
@@ -219,9 +285,66 @@ class FallbackAI:
                 )
                 errors.append(f"openrouter: {type(exc).__name__}")
 
+        if self.settings.openai_api_key:
+            try:
+                return await self._generate_openai(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "AI fallback provider exhausted: provider=openai error=%s",
+                    str(exc),
+                )
+                errors.append(f"openai: {type(exc).__name__}")
+
         if not errors:
             raise AllAIProvidersUnavailable("No fallback AI provider is configured")
         raise AllAIProvidersUnavailable("; ".join(errors))
+
+    async def _generate_openai(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: dict[str, Any],
+        max_tokens: int,
+    ) -> tuple[dict[str, Any], str]:
+        key = self.settings.openai_api_key
+        if not key:
+            raise AllAIProvidersUnavailable("OpenAI is not configured")
+
+        model = self.settings.openai_model.strip() or "gpt-5.6-luna"
+        client = AsyncOpenAI(
+            api_key=key,
+            timeout=180.0,
+            max_retries=1,
+        )
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "developer", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "capability_flow_result",
+                    "strict": False,
+                    "schema": schema,
+                },
+            },
+            reasoning_effort="none",
+            max_completion_tokens=max_tokens,
+        )
+        data = self._decode_response(response)
+        logger.info(
+            "AI fallback succeeded with provider=openai model=%s",
+            model,
+        )
+        return data, f"openai:{model}"
 
     async def _generate_groq(
         self,
@@ -283,7 +406,8 @@ class FallbackAI:
                 errors.append(f"{model}: {type(exc).__name__}")
                 if self._is_hard_rate_limit(exc):
                     logger.warning(
-                        "Groq hard quota/rate limit detected; switching immediately to OpenRouter"
+                        "Groq hard quota/rate limit detected; switching to the next "
+                        "fallback provider"
                     )
                     break
 
@@ -336,6 +460,11 @@ class FallbackAI:
                 model,
                 str(structured_exc),
             )
+            if self._is_hard_rate_limit(structured_exc):
+                logger.warning(
+                    "OpenRouter hard quota/rate limit detected; switching to OpenAI Luna"
+                )
+                raise
 
         # Some free models temporarily expose JSON mode without strict schema mode.
         # A second request keeps the application useful while downstream Pydantic
@@ -452,3 +581,4 @@ class FallbackAI:
         if not isinstance(data, dict):
             raise ValueError("provider did not return a JSON object")
         return data
+

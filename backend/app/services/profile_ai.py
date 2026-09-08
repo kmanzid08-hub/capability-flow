@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 import re
 import uuid
@@ -277,7 +277,7 @@ class ProfileAIService:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=(
                     "AI analysis is not configured. Add GEMINI_API_KEY, GROQ_API_KEY, "
-                    "or OPENROUTER_API_KEY on the backend service."
+                    "OPENROUTER_API_KEY, or OPENAI_API_KEY on the backend service."
                 ),
             )
 
