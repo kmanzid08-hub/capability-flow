@@ -22,6 +22,7 @@ import {
   GraduationCap,
   Plus,
   Search,
+  Square,
   Trash2,
   Users,
   X,
@@ -3340,6 +3341,11 @@ function DocumentsPanel({ personId }: { personId: string }) {
   } | null>(null);
   const [previewBusy, setPreviewBusy] = React.useState(false);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
+  const [analysisMode, setAnalysisMode] = React.useState<"single" | "all" | null>(null);
+  const [analysisAborting, setAnalysisAborting] = React.useState(false);
+  const [analysisNotice, setAnalysisNotice] = React.useState<string | null>(null);
+  const analysisAbortController = React.useRef<AbortController | null>(null);
+  const analysisAbortRequested = React.useRef(false);
 
   const documents = useQuery({
     queryKey: ["documents", personId],
@@ -3368,6 +3374,48 @@ function DocumentsPanel({ personId }: { personId: string }) {
       "projects",
     ]) {
       queryClient.invalidateQueries({ queryKey: [key, personId] });
+    }
+  };
+
+  const beginAnalysis = (mode: "single" | "all") => {
+    const controller = new AbortController();
+    analysisAbortController.current = controller;
+    analysisAbortRequested.current = false;
+    setAnalysisMode(mode);
+    setAnalysisAborting(false);
+    setAnalysisNotice(null);
+    setBatchError(null);
+    return controller;
+  };
+
+  const finishAnalysis = (controller: AbortController) => {
+    if (analysisAbortController.current === controller) {
+      analysisAbortController.current = null;
+      setAnalysisMode(null);
+      setAnalysisAborting(false);
+    }
+  };
+
+  const abortAnalysis = async () => {
+    if (!analysisMode) return;
+    analysisAbortRequested.current = true;
+    setAnalysisAborting(true);
+    setAnalysisNotice("Stopping analysis…");
+    analysisAbortController.current?.abort();
+
+    try {
+      await api<{ aborted: boolean; requests_cancelled: number }>(
+        `/people/${personId}/analysis/abort`,
+        {
+          method: "POST",
+          timeoutMs: 10000,
+        },
+      );
+    } catch {
+      // The browser request is already cancelled locally. The backend endpoint is
+      // best-effort insurance so an AI request does not continue consuming work.
+    } finally {
+      refreshProfile();
     }
   };
 
@@ -3404,54 +3452,103 @@ function DocumentsPanel({ personId }: { personId: string }) {
   });
 
   const analyze = useMutation({
-    mutationFn: (documentId: string) =>
-      api(`/people/${personId}/documents/${documentId}/analyze`, {
-        method: "POST",
-        timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
-      }),
-    onSuccess: refreshProfile,
+    mutationFn: async (documentId: string) => {
+      const controller = beginAnalysis("single");
+      const document = documents.data?.find((item) => item.id === documentId);
+      setBatchProgress(`Analyzing: ${document?.title ?? "document"}`);
+      try {
+        await api(`/people/${personId}/documents/${documentId}/analyze`, {
+          method: "POST",
+          timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
+          signal: controller.signal,
+        });
+        return { aborted: false };
+      } catch (error) {
+        if (analysisAbortRequested.current) {
+          return { aborted: true };
+        }
+        throw error;
+      } finally {
+        finishAnalysis(controller);
+      }
+    },
+    onSuccess: (result) => {
+      setBatchProgress(null);
+      if (result.aborted) {
+        setAnalysisNotice("Analysis aborted. No remaining analysis will be started.");
+      }
+      refreshProfile();
+    },
+    onError: (error) => {
+      setBatchProgress(null);
+      setBatchError(error instanceof Error ? error.message : "Analysis failed.");
+      refreshProfile();
+    },
   });
 
   const analyzeAll = useMutation({
     mutationFn: async () => {
       const items = documents.data ?? [];
       if (!items.length) throw new Error("Upload documents before analyzing.");
-      setBatchError(null);
+      const controller = beginAnalysis("all");
       const failures: string[] = [];
-      for (let index = 0; index < items.length; index += 1) {
-        const document = items[index];
-        setBatchProgress(`Analyzing ${index + 1} of ${items.length}: ${document.title}`);
-        let lastError: unknown = null;
-        for (let attempt = 1; attempt <= 2; attempt += 1) {
-          try {
-            await api(`/people/${personId}/documents/${document.id}/analyze`, {
-              method: "POST",
-              timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
-            });
-            lastError = null;
-            break;
-          } catch (error) {
-            lastError = error;
-            const message = error instanceof Error ? error.message : "Analysis failed";
-            const retryableFetchFailure = /failed to fetch|network|load failed/i.test(message);
-            if (!retryableFetchFailure || attempt === 2) break;
-            setBatchProgress(
-              `Retrying ${index + 1} of ${items.length}: ${document.title}`,
-            );
-            await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      let processed = 0;
+
+      try {
+        for (let index = 0; index < items.length; index += 1) {
+          if (analysisAbortRequested.current) {
+            return { aborted: true, processed, total: items.length };
           }
+
+          const document = items[index];
+          setBatchProgress(`Analyzing ${index + 1} of ${items.length}: ${document.title}`);
+          let lastError: unknown = null;
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            try {
+              await api(`/people/${personId}/documents/${document.id}/analyze`, {
+                method: "POST",
+                timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
+                signal: controller.signal,
+              });
+              lastError = null;
+              processed += 1;
+              break;
+            } catch (error) {
+              if (analysisAbortRequested.current) {
+                return { aborted: true, processed, total: items.length };
+              }
+              lastError = error;
+              const message = error instanceof Error ? error.message : "Analysis failed";
+              const retryableFetchFailure = /failed to fetch|network|load failed/i.test(message);
+              if (!retryableFetchFailure || attempt === 2) break;
+              setBatchProgress(
+                `Retrying ${index + 1} of ${items.length}: ${document.title}`,
+              );
+              await new Promise((resolve) => window.setTimeout(resolve, 2000));
+            }
+          }
+          if (lastError) {
+            failures.push(
+              `${document.title}: ${lastError instanceof Error ? lastError.message : "Analysis failed"}`,
+            );
+          }
+          refreshProfile();
         }
-        if (lastError) {
-          failures.push(
-            `${document.title}: ${lastError instanceof Error ? lastError.message : "Analysis failed"}`,
-          );
-        }
-        refreshProfile();
+        if (failures.length) throw new Error(failures.join(" | "));
+        return { aborted: false, processed, total: items.length };
+      } finally {
+        finishAnalysis(controller);
       }
-      if (failures.length) throw new Error(failures.join(" | "));
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       setBatchProgress(null);
+      if (result.aborted) {
+        const remaining = Math.max(0, result.total - result.processed);
+        setAnalysisNotice(
+          `Analysis aborted. ${result.processed} of ${result.total} documents were processed; ` +
+            `${remaining} remaining document${remaining === 1 ? " was" : "s were"} not analyzed.`,
+        );
+      }
       refreshProfile();
     },
     onError: (error) => {
@@ -3749,7 +3846,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
         <div className="mt-5">
           <Button
             type="button"
-            disabled={!files.length || uploadMutation.isPending || analyzeAll.isPending}
+            disabled={!files.length || uploadMutation.isPending || analysisMode !== null}
             onClick={() => uploadMutation.mutate()}
           >
             {uploadMutation.isPending ? batchProgress ?? "Uploading…" : `Upload ${files.length > 1 ? `${files.length} documents` : "document"}`}
@@ -3760,10 +3857,26 @@ function DocumentsPanel({ personId }: { personId: string }) {
       <section className="rounded-2xl bg-white p-7 shadow-soft">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
           <h2 className="font-serif text-2xl">Documents</h2>
-          <Button type="button" disabled={!documents.data?.length || analyzeAll.isPending || analyze.isPending || uploadMutation.isPending} onClick={() => analyzeAll.mutate()}>
-            <Sparkles size={15} className="mr-2 inline" />
-            {analyzeAll.isPending ? batchProgress ?? "Analyzing…" : "Analyze all"}
-          </Button>
+          {analysisMode ? (
+            <button
+              type="button"
+              disabled={analysisAborting}
+              onClick={() => void abortAnalysis()}
+              className="inline-flex items-center justify-center rounded-xl bg-red-600 px-5 py-3 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Square size={14} className="mr-2 inline fill-current" />
+              {analysisAborting ? "Aborting…" : "Abort analysis"}
+            </button>
+          ) : (
+            <Button
+              type="button"
+              disabled={!documents.data?.length || uploadMutation.isPending}
+              onClick={() => analyzeAll.mutate()}
+            >
+              <Sparkles size={15} className="mr-2 inline" />
+              Analyze all
+            </Button>
+          )}
         </div>
         <div className="mt-5 grid gap-3">
           {documents.isLoading ? (
@@ -3814,7 +3927,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
                     </Button>
                     <Button
                       type="button"
-                      disabled={analyze.isPending || analyzeAll.isPending}
+                      disabled={analysisMode !== null}
                       onClick={() => analyze.mutate(document.id)}
                     >
                       <Sparkles size={15} className="mr-2 inline" />
@@ -3841,6 +3954,11 @@ function DocumentsPanel({ personId }: { personId: string }) {
             />
           )}
         </div>
+        {analysisNotice && (
+          <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+            {analysisNotice}
+          </p>
+        )}
         {(analyze.error || batchError || previewError) && (
           <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
             {previewError ?? batchError ?? analyze.error?.message}
@@ -3863,7 +3981,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="h-fit rounded-full bg-mint px-3 py-1 text-xs font-semibold text-evergreen">{pendingCount} pending</span>
             {pendingCount > 0 && (
-              <Button type="button" disabled={reviewBusy || analyzeAll.isPending} onClick={() => {
+              <Button type="button" disabled={reviewBusy || analysisMode !== null} onClick={() => {
                 if (window.confirm(`Accept all ${pendingCount} pending AI suggestions exactly as shown?`)) acceptAll.mutate();
               }}>
                 <Check size={15} className="mr-2 inline" />

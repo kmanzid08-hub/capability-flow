@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -10,6 +11,11 @@ from app.schemas.profile_ai import (
     ProfileCompletenessResponse,
     ProfileSuggestionResponse,
     SuggestionEdit,
+)
+from app.services.analysis_control import (
+    abort_active_analysis,
+    register_analysis_task,
+    unregister_analysis_task,
 )
 from app.services.profile_ai import ProfileAIService
 
@@ -70,20 +76,67 @@ async def analyze_document(
         ANALYZE_ROLES,
     )
 
-    count = await _service(
-        session,
-        membership,
-        user,
-    ).analyze_document(
+    task = asyncio.current_task()
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analysis could not be started.",
+        )
+
+    register_analysis_task(
+        membership.organization_id,
+        user.id,
         person_id,
-        document_id,
+        task,
     )
+    try:
+        count = await _service(
+            session,
+            membership,
+            user,
+        ).analyze_document(
+            person_id,
+            document_id,
+        )
+    except asyncio.CancelledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Analysis aborted by user.",
+        ) from exc
+    finally:
+        unregister_analysis_task(
+            membership.organization_id,
+            user.id,
+            person_id,
+            task,
+        )
 
     return AnalyzeDocumentResponse(
         document_id=document_id,
         suggestions_created=count,
         analysis_status=("ready_for_review" if count else "complete"),
     )
+
+
+@router.post("/analysis/abort")
+async def abort_analysis(
+    person_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+) -> dict[str, int | bool]:
+    _require(
+        membership.role,
+        ANALYZE_ROLES,
+    )
+    cancelled = abort_active_analysis(
+        membership.organization_id,
+        user.id,
+        person_id,
+    )
+    return {
+        "aborted": cancelled > 0,
+        "requests_cancelled": cancelled,
+    }
 
 
 @router.get(
@@ -138,25 +191,6 @@ async def edit_suggestion(
             exclude_unset=True,
         ),
     )
-
-
-@router.post("/ai-suggestions/accept-all")
-async def accept_all_suggestions(
-    person_id: uuid.UUID,
-    membership: ActiveMembership,
-    user: CurrentUser,
-    session: SessionDep,
-) -> dict[str, object]:
-    _require(
-        membership.role,
-        REVIEW_ROLES,
-    )
-
-    return await _service(
-        session,
-        membership,
-        user,
-    ).accept_all(person_id)
 
 
 @router.post(

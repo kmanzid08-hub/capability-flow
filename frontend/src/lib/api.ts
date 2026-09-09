@@ -86,11 +86,21 @@ export async function api<T>(
   init: ApiRequestInit = {},
 ): Promise<T> {
   const controller = new AbortController();
+  const externalSignal = init.signal;
+  let timedOut = false;
+
+  const abortFromCaller = () => controller.abort();
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+
   const timeoutMs = timeoutForPath(path, init.timeoutMs);
-  const timeoutId = window.setTimeout(
-    () => controller.abort(),
-    timeoutMs,
-  );
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
   let response: Response;
 
@@ -107,7 +117,7 @@ export async function api<T>(
       referrerPolicy: init.referrerPolicy,
       integrity: init.integrity,
       keepalive: init.keepalive,
-      signal: init.signal ?? controller.signal,
+      signal: controller.signal,
     };
 
     response = await fetch(`${API_URL}${path}`, {
@@ -119,10 +129,16 @@ export async function api<T>(
       error instanceof DOMException &&
       error.name === "AbortError"
     ) {
-      throw new ApiError(
-        0,
-        "The request timed out. Please try again.",
-      );
+      if (externalSignal?.aborted) {
+        throw new ApiError(0, "Request aborted by user.");
+      }
+      if (timedOut) {
+        throw new ApiError(
+          0,
+          "The request timed out. Please try again.",
+        );
+      }
+      throw new ApiError(0, "The request was aborted.");
     }
 
     throw new ApiError(
@@ -133,6 +149,7 @@ export async function api<T>(
     );
   } finally {
     window.clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", abortFromCaller);
   }
 
   if (!response.ok) {

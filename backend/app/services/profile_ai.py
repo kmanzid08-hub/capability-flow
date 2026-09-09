@@ -285,6 +285,8 @@ class ProfileAIService:
                 ),
             )
 
+        previous_analysis_status = document.analysis_status
+        previous_analysis_error = document.analysis_error
         document.analysis_status = DocumentAnalysisStatus.PROCESSING.value
         document.analysis_error = None
         await self.session.commit()
@@ -355,6 +357,32 @@ class ProfileAIService:
             document.last_analyzed_at = datetime.now(UTC)
             await self.session.commit()
             return len(suggestions)
+
+        except asyncio.CancelledError:
+            await self.session.rollback()
+            try:
+                current_document = await self.session.get(PersonDocument, document_id)
+                if (
+                    current_document is not None
+                    and current_document.organization_id == self.organization_id
+                ):
+                    current_document.analysis_status = previous_analysis_status
+                    current_document.analysis_error = previous_analysis_error
+                    await self.session.commit()
+            except Exception:
+                await self.session.rollback()
+                logger.exception(
+                    "Could not restore document state after analysis cancellation: "
+                    "person_id=%s document_id=%s",
+                    person_id,
+                    document_id,
+                )
+            logger.info(
+                "AI document analysis aborted by user: person_id=%s document_id=%s",
+                person_id,
+                document_id,
+            )
+            raise
 
         except (UnsupportedAnalysisDocument, FileNotFoundError) as exc:
             await self.session.rollback()
