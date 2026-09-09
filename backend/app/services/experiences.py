@@ -1,9 +1,9 @@
 import uuid
-from datetime import date
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.partial_dates import validate_partial_date_range
 from app.models.experience import (
     EmploymentExperience,
     ProjectExperience,
@@ -60,8 +60,8 @@ class ExperienceService:
     @staticmethod
     def validate_dates(
         *,
-        start_date: date,
-        end_date: date | None,
+        start_date: str,
+        end_date: str | None,
         is_current: bool,
         current_label: str,
     ) -> None:
@@ -71,11 +71,13 @@ class ExperienceService:
                 detail=(f"Current {current_label} cannot have an end date"),
             )
 
-        if end_date is not None and end_date < start_date:
+        try:
+            validate_partial_date_range(start_date, end_date)
+        except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="End date cannot be earlier than start date",
-            )
+                detail=str(exc),
+            ) from exc
 
     async def list_employment(
         self,

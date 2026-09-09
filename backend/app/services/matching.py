@@ -8,6 +8,7 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.partial_dates import months_between_partial
 from app.models.capability import PersonCertification, PersonEducation, PersonSkill
 from app.models.document import PersonDocument
 from app.models.enums import ProfileStatus
@@ -185,10 +186,6 @@ def match_strength(haystack: str | None, needle: str | None) -> float:
 
 def contains(haystack: str | None, needle: str | None) -> bool:
     return match_strength(haystack, needle) >= 0.75
-
-
-def months_between(start: date, end: date) -> int:
-    return max(0, (end.year - start.year) * 12 + (end.month - start.month))
 
 
 class MatchingEngine:
@@ -600,7 +597,11 @@ class MatchingEngine:
             if employment_strength(item) >= 0.75
         ]
         months = sum(
-            months_between(item.start_date, item.end_date or date.today()) for item, _ in relevant
+            months_between_partial(
+                item.start_date,
+                item.end_date or date.today().isoformat(),
+            )
+            for item, _ in relevant
         )
         years = months / 12
         minimum = req.minimum_years or 0.0
@@ -643,7 +644,7 @@ class MatchingEngine:
             )
 
         total_months = sum(
-            months_between(item.start_date, item.end_date or date.today())
+            months_between_partial(item.start_date, item.end_date or date.today().isoformat())
             for item in profile.employment
         )
         total_years = total_months / 12
@@ -700,7 +701,10 @@ class MatchingEngine:
         if req.minimum_years:
             years = (
                 sum(
-                    months_between(item.start_date, item.end_date or date.today())
+                    months_between_partial(
+                        item.start_date,
+                        item.end_date or date.today().isoformat(),
+                    )
                     for item, _ in matches
                 )
                 / 12

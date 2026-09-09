@@ -2098,27 +2098,46 @@ function CertificationPanel({
 }
 
 
+function formatPartialExperienceDate(value: string): string {
+  if (/^\d{4}$/.test(value)) return value;
+
+  if (/^\d{4}-\d{2}$/.test(value)) {
+    const [year, month] = value.split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, 1));
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        timeZone: "UTC",
+      });
+    }
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const date = new Date(`${value}T00:00:00Z`);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      });
+    }
+  }
+
+  return value;
+}
+
 function formatExperiencePeriod(
   startDate: string,
   endDate: string | null,
   isCurrent: boolean,
 ): string {
-  const start = new Date(
-    `${startDate}T00:00:00`,
-  ).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-  });
-
+  const start = formatPartialExperienceDate(startDate);
   const end = isCurrent
     ? "Present"
     : endDate
-      ? new Date(
-        `${endDate}T00:00:00`,
-      ).toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-      })
+      ? formatPartialExperienceDate(endDate)
       : "Not recorded";
 
   return `${start} – ${end}`;
@@ -2376,7 +2395,8 @@ function WorkExperiencePanel({
 
             <Field
               label="Start date"
-              type="date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={startDate}
               onChange={(event) =>
                 setStartDate(event.target.value)
@@ -2385,7 +2405,8 @@ function WorkExperiencePanel({
 
             <Field
               label="End date"
-              type="date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={endDate}
               disabled={isCurrent}
               onChange={(event) =>
@@ -2829,7 +2850,8 @@ function ProjectsPanel({
 
             <Field
               label="Start date"
-              type="date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={startDate}
               onChange={(event) =>
                 setStartDate(event.target.value)
@@ -2838,7 +2860,8 @@ function ProjectsPanel({
 
             <Field
               label="End date"
-              type="date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={endDate}
               disabled={isCurrent}
               onChange={(event) =>
@@ -3270,11 +3293,8 @@ function suggestionValidationHint(suggestion: ProfileSuggestion): string | null 
 
   if (suggestion.category === "employment" || suggestion.category === "project") {
     const startDate = payload.start_date;
-    if (!isCompleteIsoDate(startDate) || startDate === null || startDate === undefined || startDate === "") {
-      return "A complete start date is required before this record can be saved. Use Edit before accepting and enter the exact YYYY-MM-DD date from the supporting evidence; do not guess missing precision.";
-    }
-    if (!isCompleteIsoDate(payload.end_date)) {
-      return "The end date is incomplete or invalid. Use Edit before accepting and enter YYYY-MM-DD from the supporting evidence, or leave it blank if the document does not state an end date.";
+    if (startDate === null || startDate === undefined || startDate === "") {
+      return "A start date is required. Year-only, year-month, and full dates are all accepted; keep the precision stated by the source.";
     }
   }
 
@@ -3946,8 +3966,20 @@ function DocumentsPanel({ personId }: { personId: string }) {
                                   updateEditValue(field.key, event.target.value)
                                 }
                                 className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen"
-                                placeholder={field.kind === "date" ? "YYYY-MM-DD" : field.placeholder}
-                                inputMode={field.kind === "date" ? "numeric" : undefined}
+                                placeholder={
+                                  field.kind === "date"
+                                    ? suggestion.category === "employment" || suggestion.category === "project"
+                                      ? "YYYY, YYYY-MM, or YYYY-MM-DD"
+                                      : "YYYY-MM-DD"
+                                    : field.placeholder
+                                }
+                                inputMode={
+                                  field.kind === "date" &&
+                                  suggestion.category !== "employment" &&
+                                  suggestion.category !== "project"
+                                    ? "numeric"
+                                    : undefined
+                                }
                               />
                             </label>
                           );

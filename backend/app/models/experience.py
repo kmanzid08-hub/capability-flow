@@ -1,9 +1,7 @@
 import uuid
-from datetime import date
 
 from sqlalchemy import (
     Boolean,
-    Date,
     ForeignKey,
     Index,
     String,
@@ -80,13 +78,13 @@ class EmploymentExperience(
         String(100),
     )
 
-    start_date: Mapped[date] = mapped_column(
-        Date,
+    start_date: Mapped[str] = mapped_column(
+        String(10),
         nullable=False,
     )
 
-    end_date: Mapped[date | None] = mapped_column(
-        Date,
+    end_date: Mapped[str | None] = mapped_column(
+        String(10),
     )
 
     is_current: Mapped[bool] = mapped_column(
@@ -178,13 +176,13 @@ class ProjectExperience(
         String(100),
     )
 
-    start_date: Mapped[date] = mapped_column(
-        Date,
+    start_date: Mapped[str] = mapped_column(
+        String(10),
         nullable=False,
     )
 
-    end_date: Mapped[date | None] = mapped_column(
-        Date,
+    end_date: Mapped[str | None] = mapped_column(
+        String(10),
     )
 
     is_current: Mapped[bool] = mapped_column(

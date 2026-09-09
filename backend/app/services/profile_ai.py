@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.partial_dates import PartialDateError, normalize_partial_date
 from app.models.capability import PersonCertification, PersonEducation, PersonSkill
 from app.models.document import PersonDocument
 from app.models.enums import DocumentAnalysisStatus
@@ -66,9 +67,9 @@ consulting/audit talent database.
 
 Return valid JSON only. Never invent facts. Use null when a value is not supported by the
 document. Each item must be independently reviewable by a human and contain only information
-supported by the document. Dates must use YYYY-MM-DD where a full date is known. Do not infer
-exact dates from years. For employment/project records, if only a year is known, omit the record
-unless a usable start date is explicit.
+supported by the document. Preserve the precision actually stated in the source. For employment
+and project start/end dates, use YYYY when only the year is known, YYYY-MM when the year and month
+are known, and YYYY-MM-DD only when the full date is known. Never invent a missing month or day.
 
 Return this JSON structure:
 {
@@ -156,13 +157,13 @@ Confidence must be between 0 and 1. Keep summaries concise and factual.
 Extract every reviewable fact that is explicitly supported by the document. A professional CV
 will usually contain several skills, education, employment, certifications, projects, or useful
 profile details. Do not return empty sections merely because some optional fields are missing.
-If an employment or project record cannot be represented safely because its required date is not
-explicit enough, omit that structured record but still extract all other supported evidence from it,
-such as skills, qualifications, clients, sectors, responsibilities, achievements, and useful profile
-details. For service attestations, employment certificates, reference letters, or similar evidence
-that clearly confirms an employer, role, responsibilities, or service period but lacks a full start
-date, preserve those supported facts in profile.summary and professional_title where appropriate.
-Never invent an exact date merely to create an employment or project record.
+For employment and project records, keep a source-supported year-only or year-month start date;
+those are valid partial dates. Omit the structured record only when no start date at all is
+supported.
+Still extract all other supported evidence, such as skills, qualifications, clients, sectors,
+responsibilities, achievements, and useful profile details. For service attestations, employment
+certificates, reference letters, or similar evidence, preserve exactly the date precision stated by
+the source. Never invent an exact month or day merely to create a record.
 """
 
 
@@ -630,7 +631,7 @@ class ProfileAIService:
                     )
 
                 zoom = self.settings.ai_pdf_render_dpi / 72.0
-                matrix = pymupdf.Matrix(zoom, zoom) # type: ignore[no-untyped-call]
+                matrix = pymupdf.Matrix(zoom, zoom)  # type: ignore[no-untyped-call]
                 for page_index in range(max_pages):
                     page = pdf.load_page(page_index)
                     pixmap = page.get_pixmap(matrix=matrix, alpha=False)
@@ -639,7 +640,7 @@ class ProfileAIService:
                     # Keep individual vision requests bounded. If a complex page is still
                     # unusually large, re-render at a lower resolution before sending it.
                     if len(image_data) > 10 * 1024 * 1024:
-                        reduced = pymupdf.Matrix(1.5, 1.5) # type: ignore[no-untyped-call]
+                        reduced = pymupdf.Matrix(1.5, 1.5)  # type: ignore[no-untyped-call]
                         pixmap = page.get_pixmap(matrix=reduced, alpha=False)
                         image_data = pixmap.tobytes("jpeg", jpg_quality=78)
 
@@ -675,18 +676,13 @@ class ProfileAIService:
         )
         return images
 
-
     @staticmethod
     def _has_usable_fallback_text(text: str | None) -> bool:
         if not text:
             return False
         normalized = " ".join(text.split())
         alnum = sum(ch.isalnum() for ch in normalized)
-        words = [
-            word
-            for word in normalized.split()
-            if any(ch.isalnum() for ch in word)
-        ]
+        words = [word for word in normalized.split() if any(ch.isalnum() for ch in word)]
 
         # Short documents can still contain valuable professional evidence,
         # such as a person name and professional title.
@@ -1259,8 +1255,13 @@ class ProfileAIService:
         category: str,
     ) -> dict[str, Any]:
         normalized = dict(payload)
-        normalized["start_date"] = cls._normalize_date_value(normalized.get("start_date"))
-        normalized["end_date"] = cls._normalize_date_value(normalized.get("end_date"))
+        for field in ("start_date", "end_date"):
+            value = normalized.get(field)
+            try:
+                normalized[field] = normalize_partial_date(value)
+            except PartialDateError:
+                # Preserve ambiguous source text for human review rather than guessing.
+                normalized[field] = cls._normalize_date_value(value)
 
         if normalized.get("end_date") is not None and normalized.get("is_current") is True:
             normalized["is_current"] = False
@@ -1307,20 +1308,20 @@ class ProfileAIService:
             input_value = error.get("input")
             message = str(error.get("msg") or "Invalid value")
 
-            if field in {"start_date", "end_date", "issue_date", "expiry_date"}:
+            if field in {"start_date", "end_date"}:
                 shown = f" '{input_value}'" if input_value not in (None, "") else ""
-                if field == "start_date":
-                    rendered = (
-                        f"{label}{shown} is not a complete valid date. "
-                        "Open Edit before accepting and enter the exact date as YYYY-MM-DD "
-                        "from the supporting evidence. Do not guess a day or month."
-                    )
-                else:
-                    rendered = (
-                        f"{label}{shown} is not a complete valid date. "
-                        "Enter YYYY-MM-DD from the supporting evidence, or leave it blank "
-                        "when the date is genuinely not stated."
-                    )
+                rendered = (
+                    f"{label}{shown} is not a supported experience date. "
+                    "Use YYYY, YYYY-MM, or YYYY-MM-DD exactly as supported by the source. "
+                    "Do not invent a missing month or day."
+                )
+            elif field in {"issue_date", "expiry_date"}:
+                shown = f" '{input_value}'" if input_value not in (None, "") else ""
+                rendered = (
+                    f"{label}{shown} is not a complete valid date. "
+                    "Enter YYYY-MM-DD from the supporting evidence, or leave it blank "
+                    "when the date is genuinely not stated."
+                )
             elif "End date cannot be earlier than start date" in message:
                 rendered = (
                     "End date is earlier than start date. Review the source document and "
