@@ -312,9 +312,10 @@ class ProfileAIService:
                         self.settings.ai_max_document_chars,
                     )
                 except UnsupportedAnalysisDocument as exc:
-                    if extension == ".docx" and "No readable text was found" in str(exc):
+                    if extension in {".doc", ".docx"} and "No readable text was found" in str(exc):
                         logger.info(
-                            "DOCX has no local text; attempting embedded-image recovery: file=%s",
+                            "Word document has no local text; attempting embedded-image "
+                            "recovery: file=%s",
                             document.original_filename,
                         )
                         text = None
@@ -550,7 +551,7 @@ class ProfileAIService:
             images.append((content, mime_type, document.original_filename))
         elif extension == ".pdf":
             images = self._render_pdf_pages(document.original_filename, content)
-        elif extension == ".docx":
+        elif extension in {".doc", ".docx"}:
             embedded = extract_embedded_document_images(
                 content,
                 extension,
@@ -562,7 +563,7 @@ class ProfileAIService:
             ]
             if images:
                 logger.info(
-                    "Extracted DOCX images for multimodal fallback: file=%s images=%s",
+                    "Extracted Word document images for multimodal fallback: file=%s images=%s",
                     document.original_filename,
                     len(images),
                 )
