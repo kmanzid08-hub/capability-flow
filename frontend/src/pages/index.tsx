@@ -4061,7 +4061,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
                         <>
                           <Button
                             type="button"
-                            disabled={reviewBusy || Boolean(validationHint)}
+                            disabled={reviewBusy}
                             onClick={() => accept.mutate(suggestion)}
                           >
                             <Check size={15} className="mr-2 inline" />

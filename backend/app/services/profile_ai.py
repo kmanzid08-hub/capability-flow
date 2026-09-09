@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import UTC, date, datetime
 from io import BytesIO
-from typing import Any
+from typing import Any, cast
 
 import pymupdf
 from fastapi import HTTPException, status
@@ -1450,7 +1450,7 @@ class ProfileAIService:
             return "profile", person.id
 
         if suggestion.category == "skill":
-            skill_data = SkillCreate.model_validate(payload)
+            skill_data = SkillCreate.model_construct(**cast(Any, payload))
             existing_skill = await self.session.scalar(
                 select(PersonSkill).where(
                     PersonSkill.organization_id == self.organization_id,
@@ -1470,7 +1470,7 @@ class ProfileAIService:
             return "skill", skill_entity.id
 
         if suggestion.category == "education":
-            education_data = EducationCreate.model_validate(payload)
+            education_data = EducationCreate.model_construct(**cast(Any, payload))
             education_entity = PersonEducation(
                 organization_id=self.organization_id,
                 person_id=person_id,
@@ -1481,7 +1481,7 @@ class ProfileAIService:
             return "education", education_entity.id
 
         if suggestion.category == "certification":
-            certification_data = CertificationCreate.model_validate(payload)
+            certification_data = CertificationCreate.model_construct(**cast(Any, payload))
             certification_values = certification_data.model_dump(mode="python")
             if certification_values.get("verification_url") is not None:
                 certification_values["verification_url"] = str(
@@ -1497,7 +1497,7 @@ class ProfileAIService:
             return "certification", certification_entity.id
 
         if suggestion.category == "employment":
-            employment_data = EmploymentCreate.model_validate(payload)
+            employment_data = EmploymentCreate.model_construct(**cast(Any, payload))
             employment_entity = EmploymentExperience(
                 organization_id=self.organization_id,
                 person_id=person_id,
@@ -1508,7 +1508,7 @@ class ProfileAIService:
             return "employment", employment_entity.id
 
         if suggestion.category == "project":
-            project_data = ProjectCreate.model_validate(payload)
+            project_data = ProjectCreate.model_construct(**cast(Any, payload))
             project_entity = ProjectExperience(
                 organization_id=self.organization_id,
                 person_id=person_id,
