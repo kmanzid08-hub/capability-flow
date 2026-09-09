@@ -67,9 +67,11 @@ consulting/audit talent database.
 
 Return valid JSON only. Never invent facts. Use null when a value is not supported by the
 document. Each item must be independently reviewable by a human and contain only information
-supported by the document. Preserve the precision actually stated in the source. For employment
-and project start/end dates, use YYYY when only the year is known, YYYY-MM when the year and month
-are known, and YYYY-MM-DD only when the full date is known. Never invent a missing month or day.
+supported by the document. Preserve the precision actually stated in the source for every
+professional-evidence date. Use YYYY when only the year is known, YYYY-MM when the year and month
+are known, and YYYY-MM-DD only when the full date is known. This applies to education,
+certifications, employment, projects, licenses, attestations, and similar evidence. Never invent a
+missing month or day.
 
 Return this JSON structure:
 {
@@ -97,8 +99,8 @@ Return this JSON structure:
       "field_of_study": string|null,
       "institution": string,
       "country": string|null,
-      "start_year": number|null,
-      "graduation_year": number|null,
+      "start_date": string|null,
+      "graduation_date": string|null,
       "notes": string|null,
       "confidence": number
     }
@@ -189,8 +191,8 @@ class AIEducation(BaseModel):
     field_of_study: str | None = None
     institution: str
     country: str | None = None
-    start_year: int | None = None
-    graduation_year: int | None = None
+    start_date: str | None = None
+    graduation_date: str | None = None
     notes: str | None = None
     confidence: float = Field(ge=0, le=1)
 
@@ -773,7 +775,7 @@ class ProfileAIService:
     def _dedupe_key(cls, category: str, item: dict[str, Any]) -> tuple[str, ...]:
         fields = {
             "skills": ("name",),
-            "education": ("institution", "degree_name", "field_of_study", "graduation_year"),
+            "education": ("institution", "degree_name", "field_of_study", "graduation_date"),
             "certifications": ("name", "issuer", "issue_date"),
             "employment": ("employer_name", "job_title", "start_date", "end_date"),
             "projects": ("project_name", "client_name", "role", "start_date"),
@@ -1007,9 +1009,13 @@ class ProfileAIService:
                 payload = dict(item)
                 if category in {"employment", "project"}:
                     payload = self._normalize_experience_payload(payload, category)
+                elif category == "education":
+                    payload = self._normalize_education_payload(payload)
                 elif category == "certification":
-                    payload["issue_date"] = self._normalize_date_value(payload.get("issue_date"))
-                    payload["expiry_date"] = self._normalize_date_value(payload.get("expiry_date"))
+                    payload = self._normalize_evidence_date_payload(
+                        payload,
+                        ("issue_date", "expiry_date"),
+                    )
                 confidence_value = payload.pop("confidence", None)
                 confidence = (
                     float(confidence_value) if isinstance(confidence_value, (int, float)) else None
@@ -1249,19 +1255,48 @@ class ProfileAIService:
         return cleaned
 
     @classmethod
-    def _normalize_experience_payload(
+    def _normalize_evidence_date_payload(
         cls,
         payload: dict[str, Any],
-        category: str,
+        fields: tuple[str, ...],
     ) -> dict[str, Any]:
         normalized = dict(payload)
-        for field in ("start_date", "end_date"):
+        for field in fields:
             value = normalized.get(field)
             try:
                 normalized[field] = normalize_partial_date(value)
             except PartialDateError:
                 # Preserve ambiguous source text for human review rather than guessing.
                 normalized[field] = cls._normalize_date_value(value)
+        return normalized
+
+    @classmethod
+    def _normalize_education_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        if normalized.get("start_date") is None and normalized.get("start_year") is not None:
+            normalized["start_date"] = str(normalized["start_year"])
+        if (
+            normalized.get("graduation_date") is None
+            and normalized.get("graduation_year") is not None
+        ):
+            normalized["graduation_date"] = str(normalized["graduation_year"])
+        normalized.pop("start_year", None)
+        normalized.pop("graduation_year", None)
+        return cls._normalize_evidence_date_payload(
+            normalized,
+            ("start_date", "graduation_date"),
+        )
+
+    @classmethod
+    def _normalize_experience_payload(
+        cls,
+        payload: dict[str, Any],
+        category: str,
+    ) -> dict[str, Any]:
+        normalized = cls._normalize_evidence_date_payload(
+            payload,
+            ("start_date", "end_date"),
+        )
 
         if normalized.get("end_date") is not None and normalized.get("is_current") is True:
             normalized["is_current"] = False
@@ -1292,6 +1327,7 @@ class ProfileAIService:
             "end_date": "End date",
             "issue_date": "Issue date",
             "expiry_date": "Expiry date",
+            "graduation_date": "Graduation date",
             "employer_name": "Employer",
             "job_title": "Job title",
             "project_name": "Project name",
@@ -1308,25 +1344,21 @@ class ProfileAIService:
             input_value = error.get("input")
             message = str(error.get("msg") or "Invalid value")
 
-            if field in {"start_date", "end_date"}:
+            if field in {
+                "start_date",
+                "end_date",
+                "issue_date",
+                "expiry_date",
+                "graduation_date",
+            }:
                 shown = f" '{input_value}'" if input_value not in (None, "") else ""
                 rendered = (
-                    f"{label}{shown} is not a supported experience date. "
+                    f"{label}{shown} is not a supported evidence date. "
                     "Use YYYY, YYYY-MM, or YYYY-MM-DD exactly as supported by the source. "
                     "Do not invent a missing month or day."
                 )
-            elif field in {"issue_date", "expiry_date"}:
-                shown = f" '{input_value}'" if input_value not in (None, "") else ""
-                rendered = (
-                    f"{label}{shown} is not a complete valid date. "
-                    "Enter YYYY-MM-DD from the supporting evidence, or leave it blank "
-                    "when the date is genuinely not stated."
-                )
-            elif "End date cannot be earlier than start date" in message:
-                rendered = (
-                    "End date is earlier than start date. Review the source document and "
-                    "correct the two dates before accepting."
-                )
+            elif "cannot be earlier than" in message:
+                rendered = f"{message}. Review the source document and correct the dates."
             elif "Current employment cannot have an end date" in message:
                 rendered = "Current employment cannot also have an end date. Review the dates."
             elif "Current project cannot have an end date" in message:
@@ -1388,9 +1420,14 @@ class ProfileAIService:
                     suggestion.id,
                     suggestion.category,
                 )
+        elif suggestion.category == "education":
+            payload = self._normalize_education_payload(payload)
+            suggestion.payload = payload
         elif suggestion.category == "certification":
-            payload["issue_date"] = self._normalize_date_value(payload.get("issue_date"))
-            payload["expiry_date"] = self._normalize_date_value(payload.get("expiry_date"))
+            payload = self._normalize_evidence_date_payload(
+                payload,
+                ("issue_date", "expiry_date"),
+            )
             suggestion.payload = payload
 
         if suggestion.category == "profile":

@@ -1321,8 +1321,14 @@ function EducationPanel({
     React.useState("");
 
   const [
-    graduationYear,
-    setGraduationYear,
+    startDate,
+    setStartDate,
+  ] =
+    React.useState("");
+
+  const [
+    graduationDate,
+    setGraduationDate,
   ] =
     React.useState("");
 
@@ -1367,13 +1373,13 @@ function EducationPanel({
                   country.trim() ||
                   null,
 
-                graduation_year:
-                  graduationYear ===
-                    ""
-                    ? null
-                    : Number(
-                      graduationYear,
-                    ),
+                start_date:
+                  startDate ||
+                  null,
+
+                graduation_date:
+                  graduationDate ||
+                  null,
               }),
           },
         ),
@@ -1383,7 +1389,10 @@ function EducationPanel({
         setField("");
         setInstitution("");
         setCountry("");
-        setGraduationYear(
+        setStartDate(
+          "",
+        );
+        setGraduationDate(
           "",
         );
         setDegreeLevel(
@@ -1574,17 +1583,33 @@ function EducationPanel({
             />
 
             <Field
-              label="Graduation year"
-              type="number"
-              min="1900"
-              max="2100"
+              label="Start date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={
-                graduationYear
+                startDate
               }
               onChange={(
                 event,
               ) =>
-                setGraduationYear(
+                setStartDate(
+                  event.target
+                    .value,
+                )
+              }
+            />
+
+            <Field
+              label="Graduation / completion date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
+              value={
+                graduationDate
+              }
+              onChange={(
+                event,
+              ) =>
+                setGraduationDate(
                   event.target
                     .value,
                 )
@@ -1658,7 +1683,9 @@ function EducationPanel({
                     {[
                       education.field_of_study,
                       education.country,
-                      education.graduation_year,
+                      education.start_date || education.graduation_date
+                        ? `${education.start_date ? formatPartialEvidenceDate(education.start_date) : "Start not recorded"} – ${education.graduation_date ? formatPartialEvidenceDate(education.graduation_date) : "Completion not recorded"}`
+                        : null,
                     ]
                       .filter(
                         Boolean,
@@ -1945,7 +1972,8 @@ function CertificationPanel({
 
             <Field
               label="Issue date"
-              type="date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={
                 issueDate
               }
@@ -1961,7 +1989,8 @@ function CertificationPanel({
 
             <Field
               label="Expiry date"
-              type="date"
+              type="text"
+              placeholder="YYYY, YYYY-MM, or YYYY-MM-DD"
               value={
                 expiryDate
               }
@@ -2043,7 +2072,7 @@ function CertificationPanel({
 
                   <p className="mt-1 text-sm text-slate-400">
                     {certification.expiry_date
-                      ? `Expires ${certification.expiry_date}`
+                      ? `Expires ${formatPartialEvidenceDate(certification.expiry_date)}`
                       : "No expiry date"}
                   </p>
 
@@ -2098,7 +2127,7 @@ function CertificationPanel({
 }
 
 
-function formatPartialExperienceDate(value: string): string {
+function formatPartialEvidenceDate(value: string): string {
   if (/^\d{4}$/.test(value)) return value;
 
   if (/^\d{4}-\d{2}$/.test(value)) {
@@ -2133,11 +2162,11 @@ function formatExperiencePeriod(
   endDate: string | null,
   isCurrent: boolean,
 ): string {
-  const start = formatPartialExperienceDate(startDate);
+  const start = formatPartialEvidenceDate(startDate);
   const end = isCurrent
     ? "Present"
     : endDate
-      ? formatPartialExperienceDate(endDate)
+      ? formatPartialEvidenceDate(endDate)
       : "Not recorded";
 
   return `${start} – ${end}`;
@@ -3182,8 +3211,8 @@ const suggestionFields: Record<ProfileSuggestion["category"], SuggestionField[]>
     { key: "field_of_study", label: "Field of study" },
     { key: "institution", label: "Institution" },
     { key: "country", label: "Country" },
-    { key: "start_year", label: "Start year", kind: "number" },
-    { key: "graduation_year", label: "Graduation year", kind: "number" },
+    { key: "start_date", label: "Start date", kind: "date" },
+    { key: "graduation_date", label: "Graduation / completion date", kind: "date" },
     { key: "notes", label: "Notes", kind: "textarea" },
   ],
   certification: [
@@ -3258,8 +3287,6 @@ function normalizeSuggestionPayload(
   const numericFields = new Set([
     "years_experience",
     "last_used_year",
-    "start_year",
-    "graduation_year",
   ]);
   const result: Record<string, unknown> = {};
 
@@ -3280,14 +3307,6 @@ function normalizeSuggestionPayload(
   return result;
 }
 
-function isCompleteIsoDate(value: unknown): boolean {
-  if (value === null || value === undefined || value === "") return true;
-  if (typeof value !== "string") return false;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
 function suggestionValidationHint(suggestion: ProfileSuggestion): string | null {
   const payload = suggestion.payload;
 
@@ -3298,11 +3317,6 @@ function suggestionValidationHint(suggestion: ProfileSuggestion): string | null 
     }
   }
 
-  if (suggestion.category === "certification") {
-    if (!isCompleteIsoDate(payload.issue_date) || !isCompleteIsoDate(payload.expiry_date)) {
-      return "One of the certification dates is incomplete or invalid. Enter a full YYYY-MM-DD date from the evidence, or leave the optional date blank.";
-    }
-  }
 
   return null;
 }
@@ -3617,7 +3631,18 @@ function DocumentsPanel({ personId }: { personId: string }) {
 
   const startEditing = (suggestion: ProfileSuggestion) => {
     setEditingId(suggestion.id);
-    setEditPayload({ ...suggestion.payload });
+    const payload = { ...suggestion.payload };
+    if (suggestion.category === "education") {
+      if (payload.start_date == null && payload.start_year != null) {
+        payload.start_date = String(payload.start_year);
+      }
+      if (payload.graduation_date == null && payload.graduation_year != null) {
+        payload.graduation_date = String(payload.graduation_year);
+      }
+      delete payload.start_year;
+      delete payload.graduation_year;
+    }
+    setEditPayload(payload);
   };
 
   const updateEditValue = (key: string, value: unknown) => {
@@ -3968,17 +3993,8 @@ function DocumentsPanel({ personId }: { personId: string }) {
                                 className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen"
                                 placeholder={
                                   field.kind === "date"
-                                    ? suggestion.category === "employment" || suggestion.category === "project"
-                                      ? "YYYY, YYYY-MM, or YYYY-MM-DD"
-                                      : "YYYY-MM-DD"
+                                    ? "YYYY, YYYY-MM, or YYYY-MM-DD"
                                     : field.placeholder
-                                }
-                                inputMode={
-                                  field.kind === "date" &&
-                                  suggestion.category !== "employment" &&
-                                  suggestion.category !== "project"
-                                    ? "numeric"
-                                    : undefined
                                 }
                               />
                             </label>

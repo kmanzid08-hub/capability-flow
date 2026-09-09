@@ -77,8 +77,8 @@ export type PersonEducation = {
   field_of_study: string | null;
   institution: string;
   country: string | null;
-  start_year: number | null;
-  graduation_year: number | null;
+  start_date: string | null;
+  graduation_date: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;

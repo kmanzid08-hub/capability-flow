@@ -8,7 +8,7 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.partial_dates import months_between_partial
+from app.core.partial_dates import months_between_partial, partial_date_is_expired
 from app.models.capability import PersonCertification, PersonEducation, PersonSkill
 from app.models.document import PersonDocument
 from app.models.enums import ProfileStatus
@@ -554,11 +554,11 @@ class MatchingEngine:
                 [Evidence("certification", item.name, item.issuer)],
                 "Certification matches, but required documentary evidence is not linked.",
             )
-        if item.expiry_date and item.expiry_date < date.today():
+        if item.expiry_date and partial_date_is_expired(item.expiry_date):
             return RequirementEvaluation(
                 MatchStatus.PARTIAL,
                 0.4,
-                [Evidence("certification", item.name, f"expired {item.expiry_date.isoformat()}")],
+                [Evidence("certification", item.name, f"expired {item.expiry_date}")],
                 "Certification matches but appears expired.",
             )
         evidence = [Evidence("certification", item.name, item.issuer)]

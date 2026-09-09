@@ -114,14 +114,26 @@ def partial_date_representative(value: str) -> date:
     return date.fromisoformat(normalized)
 
 
-def validate_partial_date_range(start_date: str, end_date: str | None) -> None:
+def validate_partial_date_range(
+    start_date: str,
+    end_date: str | None,
+    *,
+    start_label: str = "start date",
+    end_label: str = "End date",
+) -> None:
     if end_date is None:
         return
 
     start_min, _ = partial_date_bounds(start_date)
     _, end_max = partial_date_bounds(end_date)
     if end_max < start_min:
-        raise PartialDateError("End date cannot be earlier than start date")
+        raise PartialDateError(f"{end_label} cannot be earlier than {start_label}")
+
+
+def partial_date_is_expired(value: str, *, as_of: date | None = None) -> bool:
+    """Treat partial expiry dates as valid through the end of their stated precision."""
+    _, valid_through = partial_date_bounds(value)
+    return valid_through < (as_of or date.today())
 
 
 def months_between_partial(start_date: str, end_date: str) -> int:

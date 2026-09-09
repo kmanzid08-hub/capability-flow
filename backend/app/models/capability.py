@@ -1,8 +1,6 @@
 import uuid
-from datetime import date
 
 from sqlalchemy import (
-    Date,
     Enum,
     Float,
     ForeignKey,
@@ -125,12 +123,12 @@ class PersonEducation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(100),
     )
 
-    start_year: Mapped[int | None] = mapped_column(
-        Integer,
+    start_date: Mapped[str | None] = mapped_column(
+        String(10),
     )
 
-    graduation_year: Mapped[int | None] = mapped_column(
-        Integer,
+    graduation_date: Mapped[str | None] = mapped_column(
+        String(10),
     )
 
     notes: Mapped[str | None] = mapped_column(
@@ -180,12 +178,12 @@ class PersonCertification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(200),
     )
 
-    issue_date: Mapped[date | None] = mapped_column(
-        Date,
+    issue_date: Mapped[str | None] = mapped_column(
+        String(10),
     )
 
-    expiry_date: Mapped[date | None] = mapped_column(
-        Date,
+    expiry_date: Mapped[str | None] = mapped_column(
+        String(10),
     )
 
     verification_url: Mapped[str | None] = mapped_column(

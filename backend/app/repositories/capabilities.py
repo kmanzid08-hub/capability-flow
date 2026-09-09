@@ -87,7 +87,7 @@ class EducationRepository:
                 PersonEducation.person_id == person_id,
             )
             .order_by(
-                PersonEducation.graduation_year.desc(),
+                PersonEducation.graduation_date.desc(),
                 PersonEducation.created_at.desc(),
             )
         )

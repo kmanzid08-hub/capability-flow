@@ -50,3 +50,28 @@ def test_short_meaningful_document_text_is_usable() -> None:
 
 def test_tiny_document_fragment_is_not_usable() -> None:
     assert ProfileAIService._has_usable_fallback_text("Page 1") is False
+
+
+def test_normalize_education_payload_preserves_partial_precision() -> None:
+    payload = ProfileAIService._normalize_education_payload(
+        {
+            "start_year": 2016,
+            "graduation_year": 2020,
+            "institution": "Example University",
+        }
+    )
+
+    assert payload["start_date"] == "2016"
+    assert payload["graduation_date"] == "2020"
+    assert "start_year" not in payload
+    assert "graduation_year" not in payload
+
+
+def test_normalize_certification_payload_accepts_month_precision() -> None:
+    payload = ProfileAIService._normalize_evidence_date_payload(
+        {"issue_date": "Apr 2020", "expiry_date": "2026"},
+        ("issue_date", "expiry_date"),
+    )
+
+    assert payload["issue_date"] == "2020-04"
+    assert payload["expiry_date"] == "2026"

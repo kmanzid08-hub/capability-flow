@@ -3,6 +3,7 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.partial_dates import validate_partial_date_range
 from app.models.capability import (
     PersonCertification,
     PersonEducation,
@@ -221,25 +222,29 @@ class CapabilityService:
 
         values = data.model_dump(exclude_unset=True)
 
-        new_start_year = values.get(
-            "start_year",
-            education.start_year,
+        new_start_date = values.get(
+            "start_date",
+            education.start_date,
         )
 
-        new_graduation_year = values.get(
-            "graduation_year",
-            education.graduation_year,
+        new_graduation_date = values.get(
+            "graduation_date",
+            education.graduation_date,
         )
 
-        if (
-            new_start_year is not None
-            and new_graduation_year is not None
-            and new_graduation_year < new_start_year
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=("Graduation year cannot be earlier than start year"),
-            )
+        if new_start_date is not None:
+            try:
+                validate_partial_date_range(
+                    new_start_date,
+                    new_graduation_date,
+                    start_label="education start date",
+                    end_label="Graduation date",
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(exc),
+                ) from exc
 
         for field, value in values.items():
             setattr(education, field, value)
@@ -336,15 +341,19 @@ class CapabilityService:
             certification.expiry_date,
         )
 
-        if (
-            new_issue_date is not None
-            and new_expiry_date is not None
-            and new_expiry_date < new_issue_date
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Expiry date cannot be earlier than issue date",
-            )
+        if new_issue_date is not None:
+            try:
+                validate_partial_date_range(
+                    new_issue_date,
+                    new_expiry_date,
+                    start_label="issue date",
+                    end_label="Expiry date",
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(exc),
+                ) from exc
 
         for field, value in values.items():
             setattr(certification, field, value)
