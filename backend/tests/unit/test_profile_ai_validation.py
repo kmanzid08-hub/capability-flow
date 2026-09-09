@@ -48,3 +48,13 @@ def test_validation_error_explains_partial_start_date() -> None:
     assert "Start date" in message
     assert "YYYY-MM-DD" in message
     assert "do not guess" in message.lower()
+
+def test_short_meaningful_document_text_is_usable() -> None:
+    assert ProfileAIService._has_usable_fallback_text(
+        "Emmanuel M. MUNYAMAHORO - Market analysis Expert"
+    ) is True
+
+
+def test_tiny_document_fragment_is_not_usable() -> None:
+    assert ProfileAIService._has_usable_fallback_text("Page 1") is False
+

@@ -681,10 +681,19 @@ class ProfileAIService:
         if not text:
             return False
         normalized = " ".join(text.split())
-        if len(normalized) < 120:
-            return False
         alnum = sum(ch.isalnum() for ch in normalized)
-        return alnum >= 80
+        words = [
+            word
+            for word in normalized.split()
+            if any(ch.isalnum() for ch in word)
+        ]
+
+        # Short documents can still contain valuable professional evidence,
+        # such as a person name and professional title.
+        if len(normalized) >= 30 and alnum >= 20 and len(words) >= 4:
+            return True
+
+        return len(normalized) >= 120 and alnum >= 80
 
     @staticmethod
     def _is_hard_gemini_quota_error(exc: Exception) -> bool:
