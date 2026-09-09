@@ -1227,6 +1227,46 @@ class ProfileAIService:
         }
 
     @staticmethod
+    def _normalize_degree_level(value: Any) -> str:
+        raw = " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
+        if not raw:
+            return "other"
+        if "doctor" in raw or "phd" in raw or "ph.d" in raw:
+            return "doctorate"
+        if "master" in raw or raw in {"msc", "m.sc", "mba", "ma", "m.a"}:
+            return "master"
+        if "bachelor" in raw or raw in {"bsc", "b.sc", "ba", "b.a"}:
+            return "bachelor"
+        if "postgraduate diploma" in raw or "post graduate diploma" in raw or "diploma" in raw:
+            return "diploma"
+        if "certificate" in raw:
+            return "certificate"
+        if "associate" in raw:
+            return "associate"
+        if "professional" in raw:
+            return "professional"
+        if "secondary" in raw or "high school" in raw:
+            return "secondary"
+        return "other"
+
+    @staticmethod
+    def _normalize_skill_proficiency(value: Any) -> str | None:
+        raw = " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
+        if not raw:
+            return None
+        if raw in {"expert", "advanced", "intermediate", "beginner"}:
+            return raw
+        if raw in {"expert level", "highly proficient", "highly skilled"}:
+            return "expert"
+        if raw in {"proficient", "strong", "experienced"}:
+            return "advanced"
+        if raw in {"working knowledge", "moderate"}:
+            return "intermediate"
+        if raw in {"basic", "novice", "elementary"}:
+            return "beginner"
+        return None
+
+    @staticmethod
     def _normalize_date_value(value: Any) -> Any:
         """Normalize only dates that are already explicit; never invent missing precision."""
         if value is None:
@@ -1450,6 +1490,7 @@ class ProfileAIService:
             return "profile", person.id
 
         if suggestion.category == "skill":
+            payload["proficiency"] = self._normalize_skill_proficiency(payload.get("proficiency"))
             skill_data = SkillCreate.model_construct(**cast(Any, payload))
             existing_skill = await self.session.scalar(
                 select(PersonSkill).where(
@@ -1470,6 +1511,7 @@ class ProfileAIService:
             return "skill", skill_entity.id
 
         if suggestion.category == "education":
+            payload["degree_level"] = self._normalize_degree_level(payload.get("degree_level"))
             education_data = EducationCreate.model_construct(**cast(Any, payload))
             education_entity = PersonEducation(
                 organization_id=self.organization_id,
