@@ -490,7 +490,7 @@ export function PeoplePage() {
 
     queryFn: () =>
       api<PeopleResult>(
-        "/people",
+        "/people?limit=100",
       ),
   });
 
