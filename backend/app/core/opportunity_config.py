@@ -22,13 +22,24 @@ class OpportunityIntelligenceSettings(BaseSettings):
         le=120.0,
     )
     opportunity_max_source_characters: int = Field(
-        default=200_000,
+        default=2_000_000,
         ge=10_000,
-        le=2_000_000,
+        le=5_000_000,
     )
     opportunity_max_source_bytes: int = Field(
-        default=25 * 1024 * 1024,
+        default=250 * 1024 * 1024,
         ge=1_000_000,
+        le=500 * 1024 * 1024,
+    )
+    opportunity_analysis_chunk_characters: int = Field(
+        default=100_000,
+        ge=20_000,
+        le=200_000,
+    )
+    opportunity_analysis_chunk_overlap: int = Field(
+        default=5_000,
+        ge=0,
+        le=25_000,
     )
     opportunity_source_storage_root: Path = Path("storage/opportunity_sources")
     opportunity_max_candidates_per_role: int = Field(

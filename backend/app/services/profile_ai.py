@@ -4,6 +4,8 @@ import re
 import uuid
 from datetime import UTC, date, datetime
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
 import pymupdf
@@ -32,6 +34,7 @@ from app.services.document_storage import create_document_storage, is_temporary_
 from app.services.document_text import (
     UnsupportedAnalysisDocument,
     extract_embedded_document_images,
+    extract_pdf_text_path,
     extract_text,
     is_gemini_native_document,
 )
@@ -298,38 +301,45 @@ class ProfileAIService:
                     "Delete it and upload the original Word document instead."
                 )
 
-            content = await self.storage.read(document.storage_key)
-            if not content:
-                raise UnsupportedAnalysisDocument(
-                    "This document is empty (0 KB). Delete it and upload the original file."
-                )
             extension = document.file_extension.lower()
+            direct_media_limit = self.settings.ai_large_pdf_direct_max_mb * 1024 * 1024
 
-            text: str | None = None
-            if not is_gemini_native_document(extension):
-                try:
-                    text = extract_text(
-                        content,
-                        extension,
-                        self.settings.ai_max_document_chars,
+            if extension == ".pdf" and document.file_size > direct_media_limit:
+                result = await self._analyze_large_pdf(person, document)
+            else:
+                content = await self.storage.read(document.storage_key)
+                if not content:
+                    raise UnsupportedAnalysisDocument(
+                        "This document is empty (0 KB). Delete it and upload the original file."
                     )
-                except UnsupportedAnalysisDocument as exc:
-                    if extension in {".doc", ".docx"} and "No readable text was found" in str(exc):
-                        logger.info(
-                            "Word document has no local text; attempting embedded-image "
-                            "recovery: file=%s",
-                            document.original_filename,
-                        )
-                        text = None
-                    else:
-                        raise
 
-            result = await self._call_ai(
-                person=person,
-                document=document,
-                content=content,
-                text=text,
-            )
+                text: str | None = None
+                if not is_gemini_native_document(extension):
+                    try:
+                        text = extract_text(
+                            content,
+                            extension,
+                            self.settings.ai_max_document_chars,
+                        )
+                    except UnsupportedAnalysisDocument as exc:
+                        if extension in {".doc", ".docx"} and "No readable text was found" in str(
+                            exc
+                        ):
+                            logger.info(
+                                "Word document has no local text; attempting embedded-image "
+                                "recovery: file=%s",
+                                document.original_filename,
+                            )
+                            text = None
+                        else:
+                            raise
+
+                result = await self._call_ai(
+                    person=person,
+                    document=document,
+                    content=content,
+                    text=text,
+                )
             suggestions = self._build_suggestions(person_id, document_id, result)
             if not suggestions:
                 raise GeminiNoUsableEvidence("Gemini returned no reviewable profile evidence.")
@@ -467,6 +477,49 @@ class ProfileAIService:
                 detail="AI analysis failed. Please retry in a moment.",
             ) from exc
 
+    async def _analyze_large_pdf(
+        self,
+        person: Person,
+        document: PersonDocument,
+    ) -> dict[str, Any]:
+        """Analyze an oversized PDF without sending the whole binary to an AI provider."""
+        with TemporaryDirectory(prefix="capability-flow-large-pdf-") as directory:
+            path = Path(directory) / "document.pdf"
+            await self.storage.download_to_path(document.storage_key, path)
+
+            if not path.is_file() or path.stat().st_size == 0:
+                raise UnsupportedAnalysisDocument(
+                    "The stored PDF could not be prepared for large-document analysis."
+                )
+
+            text = extract_pdf_text_path(path, self.settings.ai_max_document_chars)
+            if self._has_usable_fallback_text(text):
+                logger.info(
+                    "Large PDF using text-first analysis: file=%s bytes=%s chars=%s",
+                    document.original_filename,
+                    document.file_size,
+                    len(text),
+                )
+                return await self._call_ai(
+                    person=person,
+                    document=document,
+                    content=b"",
+                    text=text,
+                )
+
+            logger.info(
+                "Large PDF has no searchable text; using page-image recovery: file=%s bytes=%s",
+                document.original_filename,
+                document.file_size,
+            )
+            return await self._call_ai(
+                person=person,
+                document=document,
+                content=b"",
+                text=None,
+                pdf_path=path,
+            )
+
     async def _mark_analysis_failed(self, document_id: uuid.UUID, message: str) -> None:
         document = await self.session.get(PersonDocument, document_id)
         if document is None or document.organization_id != self.organization_id:
@@ -483,7 +536,36 @@ class ProfileAIService:
         document: PersonDocument,
         content: bytes,
         text: str | None,
+        pdf_path: Path | None = None,
     ) -> dict[str, Any]:
+        if text and len(text) > self.settings.ai_large_document_chunk_chars:
+            chunks = self._chunk_fallback_text(
+                text,
+                max_chars=self.settings.ai_large_document_chunk_chars,
+            )
+            large_results: list[dict[str, Any]] = []
+            for index, chunk in enumerate(chunks, start=1):
+                logger.info(
+                    "Analyzing large profile text chunk %s/%s for file=%s",
+                    index,
+                    len(chunks),
+                    document.original_filename,
+                )
+                large_results.append(
+                    await self._call_ai(
+                        person=person,
+                        document=document,
+                        content=b"",
+                        text=chunk,
+                    )
+                )
+            merged = self._merge_extractions(large_results)
+            if not self._has_meaningful_evidence(merged):
+                raise GeminiNoUsableEvidence(
+                    "Large-document chunks returned no reviewable profile evidence"
+                )
+            return merged
+
         gemini_error: Exception | None = None
         if self.settings.gemini_api_key:
             try:
@@ -505,15 +587,25 @@ class ProfileAIService:
         fallback_text = text
         if fallback_text is None and document.file_extension.lower() == ".pdf":
             try:
-                reader = PdfReader(BytesIO(content))
-                pages = [(page.extract_text() or "").strip() for page in reader.pages]
-                fallback_text = "\n\n".join(page for page in pages if page)
-                fallback_text = fallback_text[: self.settings.ai_max_document_chars]
+                if pdf_path is not None:
+                    fallback_text = extract_pdf_text_path(
+                        pdf_path,
+                        self.settings.ai_max_document_chars,
+                    )
+                elif content:
+                    reader = PdfReader(BytesIO(content))
+                    pages = [(page.extract_text() or "").strip() for page in reader.pages]
+                    fallback_text = "\n\n".join(page for page in pages if page)
+                    fallback_text = fallback_text[: self.settings.ai_max_document_chars]
             except Exception as exc:
                 logger.warning("PDF fallback text extraction failed: %s", str(exc))
                 fallback_text = None
         if not self._has_usable_fallback_text(fallback_text):
-            fallback_text = await self._recover_image_text(document, content)
+            fallback_text = await self._recover_image_text(
+                document,
+                content,
+                pdf_path=pdf_path,
+            )
         if not fallback_text:
             raise DocumentTextRecoveryUnavailable(
                 "AI could not recover readable text from this scanned or image-based document. "
@@ -570,6 +662,7 @@ class ProfileAIService:
         self,
         document: PersonDocument,
         content: bytes,
+        pdf_path: Path | None = None,
     ) -> str | None:
         extension = document.file_extension.lower()
         images: list[tuple[bytes, str, str]] = []
@@ -578,7 +671,11 @@ class ProfileAIService:
             mime_type = GEMINI_MEDIA_TYPES.get(extension, "image/jpeg")
             images.append((content, mime_type, document.original_filename))
         elif extension == ".pdf":
-            images = self._render_pdf_pages(document.original_filename, content)
+            images = self._render_pdf_pages(
+                document.original_filename,
+                content,
+                pdf_path=pdf_path,
+            )
         elif extension in {".doc", ".docx"}:
             embedded = extract_embedded_document_images(
                 content,
@@ -645,10 +742,21 @@ class ProfileAIService:
         self,
         filename: str,
         content: bytes,
+        pdf_path: Path | None = None,
     ) -> list[tuple[bytes, str, str]]:
         images: list[tuple[bytes, str, str]] = []
         try:
-            with pymupdf.open(stream=content, filetype="pdf") as pdf:  # type: ignore[no-untyped-call]
+            if pdf_path is not None:
+                pdf_context = pymupdf.open(pdf_path)  # type: ignore[no-untyped-call]
+            elif content:
+                pdf_context = pymupdf.open(  # type: ignore[no-untyped-call]
+                    stream=content,
+                    filetype="pdf",
+                )
+            else:
+                return images
+
+            with pdf_context as pdf:
                 if pdf.page_count == 0:
                     return images
 
@@ -732,7 +840,7 @@ class ProfileAIService:
         )
 
     @staticmethod
-    def _chunk_fallback_text(text: str, max_chars: int = 8500) -> list[str]:
+    def _chunk_fallback_text(text: str, max_chars: int = 20_000) -> list[str]:
         text = text.strip()
         if len(text) <= max_chars:
             return [text]
@@ -849,13 +957,13 @@ class ProfileAIService:
 
         extension = document.file_extension.lower()
         base_parts: list[types.Part] = []
-        if extension in GEMINI_MEDIA_TYPES:
+        if text is not None:
+            base_parts.append(types.Part.from_text(text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}"))
+        elif extension in GEMINI_MEDIA_TYPES and content:
             base_parts.append(
                 types.Part.from_bytes(data=content, mime_type=GEMINI_MEDIA_TYPES[extension])
             )
             base_parts.append(types.Part.from_text(text=prompt))
-        elif text is not None:
-            base_parts.append(types.Part.from_text(text=f"{prompt}\n\nDOCUMENT TEXT:\n{text}"))
         else:
             raise UnsupportedAnalysisDocument(
                 f"AI extraction is not available for {extension or 'this file type'} yet."

@@ -1,8 +1,9 @@
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import boto3  # type: ignore[import-untyped]
+from boto3.s3.transfer import TransferConfig  # type: ignore[import-untyped]
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
@@ -20,6 +21,12 @@ class OpportunitySourceStorage:
         self.app_settings = get_settings()
 
         self.client: Any | None = None
+        self.transfer_config = TransferConfig(
+            multipart_threshold=8 * 1024 * 1024,
+            multipart_chunksize=8 * 1024 * 1024,
+            max_concurrency=4,
+            use_threads=True,
+        )
 
         if self.app_settings.storage_backend == "r2":
             if not all(
@@ -86,6 +93,62 @@ class OpportunitySourceStorage:
             stored_filename,
             str(path),
         )
+
+    async def store_fileobj(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        opportunity_id: uuid.UUID,
+        source: BinaryIO,
+        filename: str,
+        file_size: int,
+        mime_type: str | None = None,
+    ) -> tuple[str, str]:
+        if file_size <= 0:
+            raise ValueError("Empty opportunity files are not allowed")
+        if file_size > self.settings.opportunity_max_source_bytes:
+            raise ValueError("Opportunity document exceeds the configured size limit")
+
+        suffix = Path(filename).suffix.lower()[:20]
+        stored_filename = f"{uuid.uuid4().hex}{suffix}"
+        source.seek(0)
+
+        if self.app_settings.storage_backend == "r2":
+            key = f"opportunity-sources/{organization_id}/{opportunity_id}/{stored_filename}"
+            assert self.client is not None
+            kwargs: dict[str, object] = {"Config": self.transfer_config}
+            if mime_type:
+                kwargs["ExtraArgs"] = {"ContentType": mime_type}
+            await run_in_threadpool(
+                self.client.upload_fileobj,
+                source,
+                self.app_settings.r2_bucket_name,
+                key,
+                **kwargs,
+            )
+            source.seek(0)
+            return stored_filename, f"r2://{key}"
+
+        directory = (
+            self.settings.opportunity_source_storage_root
+            / str(organization_id)
+            / str(opportunity_id)
+        )
+        await run_in_threadpool(directory.mkdir, 0o755, True, True)
+        path = directory / stored_filename
+        await run_in_threadpool(self._copy_stream, source, path)
+        source.seek(0)
+        return stored_filename, str(path)
+
+    @staticmethod
+    def _copy_stream(source: BinaryIO, path: Path) -> None:
+        source.seek(0)
+        with path.open("wb") as output:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
 
     async def read(
         self,

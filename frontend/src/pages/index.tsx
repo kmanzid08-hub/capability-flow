@@ -43,7 +43,14 @@ import {
   PageHeader,
   TextArea,
 } from "../components/ui";
-import { AI_ANALYSIS_TIMEOUT_MS, API_URL, api, apiBlob, apiDownload } from "../lib/api";
+import {
+  AI_ANALYSIS_TIMEOUT_MS,
+  API_URL,
+  LARGE_UPLOAD_TIMEOUT_MS,
+  api,
+  apiBlob,
+  apiDownload,
+} from "../lib/api";
 import { session } from "../lib/session";
 import type {
   CurrentUser,
@@ -3135,6 +3142,10 @@ function validateDocumentSelection(file: File): string | null {
   if (file.size === 0) {
     return `${file.name} is empty (0 KB). Please upload the original document.`;
   }
+  const maxBytes = 250 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    return `${file.name} exceeds the 250 MB upload limit.`;
+  }
   return null;
 }
 
@@ -3434,6 +3445,7 @@ function DocumentsPanel({ personId }: { personId: string }) {
         uploaded.push(await api<PersonDocument>(`/people/${personId}/documents`, {
           method: "POST",
           body: form,
+          timeoutMs: LARGE_UPLOAD_TIMEOUT_MS,
         }));
       }
       return uploaded;

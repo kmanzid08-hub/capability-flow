@@ -1,11 +1,12 @@
 import os
+import shutil
 import uuid
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
 import boto3  # type: ignore[import-untyped]
+from boto3.s3.transfer import TransferConfig  # type: ignore[import-untyped]
 from fastapi import UploadFile
 from starlette.concurrency import run_in_threadpool
 
@@ -78,6 +79,12 @@ class DocumentStorage(Protocol):
         self,
         storage_key: str,
     ) -> bytes: ...
+
+    async def download_to_path(
+        self,
+        storage_key: str,
+        destination: Path,
+    ) -> None: ...
 
     async def delete(
         self,
@@ -197,6 +204,17 @@ class LocalDocumentStorage:
 
         return await run_in_threadpool(path.read_bytes)
 
+    async def download_to_path(
+        self,
+        storage_key: str,
+        destination: Path,
+    ) -> None:
+        path = self._resolve_key(storage_key)
+        if not path.is_file():
+            raise FileNotFoundError("Document file not found")
+        await run_in_threadpool(destination.parent.mkdir, 0o755, True, True)
+        await run_in_threadpool(shutil.copyfile, path, destination)
+
     async def delete(
         self,
         storage_key: str,
@@ -280,6 +298,12 @@ class R2DocumentStorage:
             aws_secret_access_key=(secret_access_key),
             region_name="auto",
         )
+        self.transfer_config = TransferConfig(
+            multipart_threshold=8 * 1024 * 1024,
+            multipart_chunksize=8 * 1024 * 1024,
+            max_concurrency=4,
+            use_threads=True,
+        )
 
     async def save(
         self,
@@ -296,15 +320,20 @@ class R2DocumentStorage:
         storage_key = f"documents/{organization_id}/{person_id}/{uuid.uuid4().hex}{extension}"
 
         await upload.seek(0)
+        file_size = await run_in_threadpool(self._stream_size, upload.file)
+        if file_size == 0:
+            raise InvalidDocumentFile("Empty files are not allowed")
+        if file_size > self.max_file_size_bytes:
+            raise DocumentTooLarge("The uploaded file exceeds the configured size limit")
 
-        content = await self._read_upload(upload)
-
+        await upload.seek(0)
         await run_in_threadpool(
-            self.client.put_object,
-            Bucket=self.bucket_name,
-            Key=storage_key,
-            Body=content,
-            ContentType=mime_type,
+            self.client.upload_fileobj,
+            upload.file,
+            self.bucket_name,
+            storage_key,
+            ExtraArgs={"ContentType": mime_type},
+            Config=self.transfer_config,
         )
 
         return StoredDocument(
@@ -312,7 +341,7 @@ class R2DocumentStorage:
             original_filename=original_filename,
             file_extension=extension,
             mime_type=mime_type,
-            file_size=len(content),
+            file_size=file_size,
         )
 
     async def read(
@@ -328,6 +357,19 @@ class R2DocumentStorage:
         content: bytes = await run_in_threadpool(body.read)
         return content
 
+    async def download_to_path(
+        self,
+        storage_key: str,
+        destination: Path,
+    ) -> None:
+        await run_in_threadpool(destination.parent.mkdir, 0o755, True, True)
+        await run_in_threadpool(
+            self.client.download_file,
+            self.bucket_name,
+            storage_key,
+            str(destination),
+        )
+
     async def delete(
         self,
         storage_key: str,
@@ -338,30 +380,13 @@ class R2DocumentStorage:
             Key=storage_key,
         )
 
-    async def _read_upload(
-        self,
-        upload: UploadFile,
-    ) -> bytes:
-        output = BytesIO()
-        total = 0
-
-        while True:
-            chunk = await upload.read(1024 * 1024)
-
-            if not chunk:
-                break
-
-            total += len(chunk)
-
-            if total > self.max_file_size_bytes:
-                raise DocumentTooLarge("The uploaded file exceeds the configured size limit")
-
-            output.write(chunk)
-
-        if total == 0:
-            raise InvalidDocumentFile("Empty files are not allowed")
-
-        return output.getvalue()
+    @staticmethod
+    def _stream_size(source: BinaryIO) -> int:
+        original = source.tell()
+        source.seek(0, 2)
+        size = source.tell()
+        source.seek(original)
+        return int(size)
 
 
 def create_document_storage(

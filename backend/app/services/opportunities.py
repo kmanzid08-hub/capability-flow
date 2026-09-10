@@ -1,10 +1,12 @@
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import BinaryIO
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.opportunity_config import get_opportunity_intelligence_settings
 from app.models.opportunity import (
@@ -37,7 +39,10 @@ from app.services.requirement_extraction import (
     GeminiRequirementExtractor,
     RequirementExtractionError,
 )
-from app.services.source_ingestion import OpportunitySourceIngestionService
+from app.services.source_ingestion import (
+    OpportunitySourceIngestionService,
+    SourceIngestionError,
+)
 from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer
 
 
@@ -414,6 +419,94 @@ class OpportunityService:
         await self.session.commit()
         await self.session.refresh(source)
         return source
+
+    async def add_upload_source(
+        self,
+        opportunity_id: uuid.UUID,
+        upload: UploadFile,
+        filename: str,
+        mime_type: str | None,
+    ) -> OpportunitySource:
+        opportunity = await self.get(opportunity_id)
+
+        await upload.seek(0)
+        file_size = await run_in_threadpool(self._stream_size, upload.file)
+        if file_size <= 0:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Opportunity document is empty",
+            )
+        if file_size > self.settings.opportunity_max_source_bytes:
+            limit_mb = self.settings.opportunity_max_source_bytes // (1024 * 1024)
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"Opportunity document exceeds {limit_mb} MB",
+            )
+
+        try:
+            ingested = await run_in_threadpool(
+                self.ingestion.from_fileobj,
+                upload.file,
+                filename,
+                mime_type,
+                file_size,
+            )
+        except SourceIngestionError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                str(exc),
+            ) from exc
+
+        existing = await self._existing_source_by_hash(opportunity_id, ingested.content_hash)
+        if existing is not None:
+            return existing
+
+        suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else "other"
+        source_type = {
+            "pdf": OpportunitySourceType.PDF,
+            "docx": OpportunitySourceType.DOCX,
+            "xlsx": OpportunitySourceType.XLSX,
+            "xlsm": OpportunitySourceType.XLSX,
+            "pptx": OpportunitySourceType.PPTX,
+        }.get(suffix, OpportunitySourceType.OTHER)
+
+        await upload.seek(0)
+        stored_filename, storage_path = await self.source_storage.store_fileobj(
+            organization_id=self.organization_id,
+            opportunity_id=opportunity_id,
+            source=upload.file,
+            filename=filename,
+            file_size=file_size,
+            mime_type=mime_type or ingested.mime_type,
+        )
+
+        source = OpportunitySource(
+            organization_id=self.organization_id,
+            opportunity_id=opportunity_id,
+            source_type=source_type,
+            original_filename=filename,
+            stored_filename=stored_filename,
+            storage_path=storage_path,
+            file_size=file_size,
+            mime_type=mime_type or ingested.mime_type,
+            raw_text=ingested.text,
+            content_hash=ingested.content_hash,
+            metadata_json=ingested.metadata,
+            created_by_user_id=self.user_id,
+        )
+        self.repo.add(source)
+        self._apply_source_metadata(opportunity, source)
+        await self.session.commit()
+        await self.session.refresh(source)
+        return source
+
+    @staticmethod
+    def _stream_size(source: BinaryIO) -> int:
+        original = source.tell()
+        source.seek(0, 2)
+        size = source.tell()
+        source.seek(original)
+        return int(size)
 
     async def add_file_source(
         self,

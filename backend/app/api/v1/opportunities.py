@@ -159,7 +159,6 @@ async def intake_file(
     client_name: Annotated[str | None, Form()] = None,
 ) -> OpportunityIntakeResponse:
     require_write_access(membership)
-    content = await file.read()
     svc = service(session, membership, user)
     opportunity = await svc.create(
         OpportunityCreate(
@@ -167,9 +166,9 @@ async def intake_file(
             client_name=client_name,
         )
     )
-    source = await svc.add_file_source(
+    source = await svc.add_upload_source(
         opportunity.id,
-        content,
+        file,
         file.filename or "source",
         file.content_type,
     )
@@ -260,12 +259,9 @@ async def add_file_source(
     file: Annotated[UploadFile, File()],
 ) -> dict[str, str]:
     require_write_access(membership)
-    content = await file.read()
-    if len(content) > 25 * 1024 * 1024:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Opportunity document exceeds 25 MB")
-    source = await service(session, membership, user).add_file_source(
+    source = await service(session, membership, user).add_upload_source(
         opportunity_id,
-        content,
+        file,
         file.filename or "source",
         file.content_type,
     )

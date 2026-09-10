@@ -1,4 +1,6 @@
 import json
+import re
+from typing import Any
 
 from google import genai
 from google.genai import types
@@ -96,10 +98,38 @@ class GeminiRequirementExtractor:
 
     async def extract(self, source_text: str) -> ExtractedOpportunity:
         source_text = source_text[: self.opportunity_settings.opportunity_max_source_characters]
+        chunks = self._chunk_source(source_text)
+        results: list[ExtractedOpportunity] = []
+
+        for index, chunk in enumerate(chunks, start=1):
+            results.append(
+                await self._extract_one(
+                    chunk,
+                    chunk_index=index,
+                    chunk_count=len(chunks),
+                )
+            )
+
+        return self._merge_results(results)
+
+    async def _extract_one(
+        self,
+        source_text: str,
+        *,
+        chunk_index: int,
+        chunk_count: int,
+    ) -> ExtractedOpportunity:
         schema = ExtractedOpportunity.model_json_schema()
+        chunk_note = (
+            f" This is source chunk {chunk_index} of {chunk_count}. "
+            "Extract every supported requirement in this chunk; do not assume omitted "
+            "sections are absent from the full source."
+            if chunk_count > 1
+            else ""
+        )
         user_prompt = (
-            "Analyze the client opportunity below and return the complete structured result.\n\n"
-            f"SOURCE:\n{source_text}"
+            "Analyze the client opportunity below and return the complete structured result."
+            f"{chunk_note}\n\nSOURCE:\n{source_text}"
         )
         gemini_error: Exception | None = None
 
@@ -145,3 +175,141 @@ class GeminiRequirementExtractor:
         raise RequirementExtractionError(
             f"Gemini opportunity analysis failed: {gemini_error}"
         ) from gemini_error
+
+    def _chunk_source(self, text: str) -> list[str]:
+        text = text.strip()
+        maximum = self.opportunity_settings.opportunity_analysis_chunk_characters
+        overlap = min(
+            self.opportunity_settings.opportunity_analysis_chunk_overlap,
+            max(0, maximum // 4),
+        )
+        if len(text) <= maximum:
+            return [text]
+
+        chunks: list[str] = []
+        start = 0
+        while start < len(text):
+            end = min(len(text), start + maximum)
+            if end < len(text):
+                split = max(
+                    text.rfind("\n\n", start, end),
+                    text.rfind("\n", start, end),
+                )
+                if split > start + maximum // 2:
+                    end = split
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= len(text):
+                break
+            start = max(start + 1, end - overlap)
+        return chunks
+
+    @staticmethod
+    def _normal_key(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    @classmethod
+    def _requirement_key(cls, item: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            cls._normal_key(item.get("requirement_type")),
+            cls._normal_key(item.get("normalized_value") or item.get("label")),
+            item.get("minimum_years"),
+            item.get("minimum_count"),
+            cls._normal_key(item.get("minimum_degree_level")),
+            cls._normal_key(item.get("operator")),
+        )
+
+    @classmethod
+    def _merge_role(cls, current: dict[str, Any], incoming: dict[str, Any]) -> None:
+        current["quantity"] = max(
+            int(current.get("quantity") or 1),
+            int(incoming.get("quantity") or 1),
+        )
+        current["is_mandatory"] = bool(current.get("is_mandatory") or incoming.get("is_mandatory"))
+
+        incoming_description = incoming.get("description")
+        current_description = current.get("description")
+        if isinstance(incoming_description, str) and len(incoming_description) > len(
+            str(current_description or "")
+        ):
+            current["description"] = incoming_description
+
+        existing_requirements = current.get("requirements")
+        if not isinstance(existing_requirements, list):
+            existing_requirements = []
+            current["requirements"] = existing_requirements
+
+        existing_keys = {
+            cls._requirement_key(item) for item in existing_requirements if isinstance(item, dict)
+        }
+        incoming_requirements = incoming.get("requirements")
+        if isinstance(incoming_requirements, list):
+            for requirement in incoming_requirements:
+                if not isinstance(requirement, dict):
+                    continue
+                key = cls._requirement_key(requirement)
+                if key not in existing_keys:
+                    existing_requirements.append(requirement)
+                    existing_keys.add(key)
+
+    @classmethod
+    def _merge_results(
+        cls,
+        results: list[ExtractedOpportunity],
+    ) -> ExtractedOpportunity:
+        if not results:
+            raise RequirementExtractionError("Opportunity analysis returned no chunks")
+
+        merged = results[0].model_dump(mode="python")
+        roles = merged.get("roles")
+        if not isinstance(roles, list):
+            roles = []
+            merged["roles"] = roles
+        team_requirements = merged.get("team_requirements")
+        if not isinstance(team_requirements, list):
+            team_requirements = []
+            merged["team_requirements"] = team_requirements
+
+        for result in results[1:]:
+            candidate = result.model_dump(mode="python")
+            for key in ("title", "client_name", "reference_number", "deadline_at"):
+                if not merged.get(key) and candidate.get(key):
+                    merged[key] = candidate[key]
+
+            candidate_summary = candidate.get("summary")
+            if isinstance(candidate_summary, str) and len(candidate_summary) > len(
+                str(merged.get("summary") or "")
+            ):
+                merged["summary"] = candidate_summary
+
+            role_index = {
+                cls._normal_key(item.get("title")): item for item in roles if isinstance(item, dict)
+            }
+            candidate_roles = candidate.get("roles")
+            if isinstance(candidate_roles, list):
+                for role in candidate_roles:
+                    if not isinstance(role, dict):
+                        continue
+                    key = cls._normal_key(role.get("title"))
+                    current = role_index.get(key)
+                    if current is None:
+                        roles.append(role)
+                        role_index[key] = role
+                    else:
+                        cls._merge_role(current, role)
+
+            team_keys = {
+                cls._requirement_key(item) for item in team_requirements if isinstance(item, dict)
+            }
+            candidate_team = candidate.get("team_requirements")
+            if isinstance(candidate_team, list):
+                for requirement in candidate_team:
+                    if not isinstance(requirement, dict):
+                        continue
+                    team_key = cls._requirement_key(requirement)
+                    if team_key not in team_keys:
+                        team_requirements.append(requirement)
+                        team_keys.add(team_key)
+
+        return ExtractedOpportunity.model_validate(merged)

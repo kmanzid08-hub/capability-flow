@@ -4,8 +4,10 @@ import json
 import re
 import zipfile
 from io import BytesIO
+from pathlib import Path
 from xml.etree import ElementTree
 
+import pymupdf
 from docx import Document
 from legacy_doc import extract_text as extract_legacy_doc_text
 from openpyxl import load_workbook
@@ -354,6 +356,37 @@ def _extract_word_like_text(content: bytes, declared_extension: str) -> str:
     if declared_extension == ".doc":
         return _extract_legacy_doc_text(content)
     return _extract_docx_text(content)
+
+
+def extract_pdf_text_path(path: Path, max_chars: int) -> str:
+    """Extract text across a large PDF without loading the whole PDF into RAM."""
+    if max_chars <= 0:
+        return ""
+
+    chunks: list[str] = []
+    used = 0
+    try:
+        with pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
+            for page_index in range(pdf.page_count):
+                page = pdf.load_page(page_index)
+                page_text = str(page.get_text("text") or "").strip()
+                if not page_text:
+                    continue
+
+                labelled = f"[Page {page_index + 1}]\n{page_text}"
+                remaining = max_chars - used
+                if remaining <= 0:
+                    break
+                if len(labelled) > remaining:
+                    labelled = labelled[:remaining]
+                chunks.append(labelled)
+                used += len(labelled)
+                if used >= max_chars:
+                    break
+    except Exception as exc:
+        raise UnsupportedAnalysisDocument("The PDF file could not be read.") from exc
+
+    return "\n\n".join(chunks).strip()
 
 
 def extract_text(content: bytes, extension: str, max_chars: int) -> str:

@@ -4,6 +4,7 @@ import ipaddress
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -152,6 +153,119 @@ class OpportunitySourceIngestionService:
             original_bytes=content,
             suggested_filename=path_name or "source.html",
             metadata=metadata,
+        )
+
+    def from_fileobj(
+        self,
+        source: BinaryIO,
+        filename: str,
+        mime_type: str | None = None,
+        file_size: int | None = None,
+    ) -> IngestedSource:
+        if file_size is None:
+            original = source.tell()
+            source.seek(0, 2)
+            file_size = int(source.tell())
+            source.seek(original)
+
+        if file_size > self.settings.opportunity_max_source_bytes:
+            raise SourceIngestionError("The opportunity document exceeds the size limit")
+        if file_size <= 0:
+            raise SourceIngestionError("The opportunity document is empty")
+
+        suffix = Path(filename).suffix.lower()
+        source.seek(0)
+        try:
+            if suffix == ".pdf":
+                reader = PdfReader(source)
+                page_chunks: list[str] = []
+                used = 0
+                maximum = self.settings.opportunity_max_source_characters
+                for page_index, page in enumerate(reader.pages, start=1):
+                    value = (page.extract_text() or "").strip()
+                    if not value:
+                        continue
+                    piece = f"[Page {page_index}]\n{value}"
+                    remaining = maximum - used
+                    if remaining <= 0:
+                        break
+                    if len(piece) > remaining:
+                        piece = piece[:remaining]
+                    page_chunks.append(piece)
+                    used += len(piece)
+                    if used >= maximum:
+                        break
+                text = "\n\n".join(page_chunks)
+            elif suffix == ".docx":
+                document = Document(source)
+                doc_chunks = [paragraph.text for paragraph in document.paragraphs]
+                for table in document.tables:
+                    for row in table.rows:
+                        doc_chunks.append(" | ".join(cell.text for cell in row.cells))
+                text = "\n".join(doc_chunks)
+            elif suffix in {".xlsx", ".xlsm"}:
+                workbook = load_workbook(source, read_only=True, data_only=True)
+                sheet_chunks: list[str] = []
+                used = 0
+                maximum = self.settings.opportunity_max_source_characters
+                stop = False
+                for sheet in workbook.worksheets:
+                    sheet_chunks.append(f"Sheet: {sheet.title}")
+                    for row in sheet.iter_rows(values_only=True):
+                        values = [str(value) for value in row if value not in (None, "")]
+                        if values:
+                            piece = " | ".join(values)
+                            remaining = maximum - used
+                            if remaining <= 0:
+                                stop = True
+                                break
+                            if len(piece) > remaining:
+                                piece = piece[:remaining]
+                            sheet_chunks.append(piece)
+                            used += len(piece)
+                    if stop:
+                        break
+                text = "\n".join(sheet_chunks)
+                workbook.close()
+            elif suffix == ".pptx":
+                presentation = Presentation(source)
+                slide_chunks: list[str] = []
+                used = 0
+                maximum = self.settings.opportunity_max_source_characters
+                stop = False
+                for slide in presentation.slides:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            piece = str(shape.text)
+                            remaining = maximum - used
+                            if remaining <= 0:
+                                stop = True
+                                break
+                            if len(piece) > remaining:
+                                piece = piece[:remaining]
+                            slide_chunks.append(piece)
+                            used += len(piece)
+                    if stop:
+                        break
+                text = "\n".join(slide_chunks)
+            elif suffix in {".txt", ".csv", ".rtf"}:
+                max_bytes = min(
+                    file_size,
+                    self.settings.opportunity_max_source_characters * 4,
+                )
+                raw = source.read(max_bytes)
+                text = raw.decode("utf-8", errors="replace")
+            else:
+                raise SourceIngestionError(
+                    f"Unsupported opportunity document type: {suffix or 'none'}"
+                )
+        finally:
+            source.seek(0)
+
+        return self._finish(
+            text,
+            mime_type,
+            suggested_filename=filename,
         )
 
     def from_bytes(

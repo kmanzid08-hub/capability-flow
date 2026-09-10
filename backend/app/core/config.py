@@ -24,9 +24,9 @@ class Settings(BaseSettings):
 
     document_storage_path: Path = Path("storage/documents")
     document_max_file_size_mb: int = Field(
-        default=25,
+        default=250,
         ge=1,
-        le=250,
+        le=500,
     )
 
     r2_endpoint_url: str | None = None
@@ -43,8 +43,10 @@ class Settings(BaseSettings):
     openrouter_model: str = "openrouter/free"
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.6-luna"
-    ai_max_document_chars: int = Field(default=120_000, ge=10_000, le=500_000)
-    ai_pdf_vision_max_pages: int = Field(default=20, ge=1, le=50)
+    ai_max_document_chars: int = Field(default=500_000, ge=10_000, le=2_000_000)
+    ai_large_pdf_direct_max_mb: int = Field(default=45, ge=5, le=50)
+    ai_large_document_chunk_chars: int = Field(default=60_000, ge=10_000, le=120_000)
+    ai_pdf_vision_max_pages: int = Field(default=100, ge=1, le=250)
     ai_docx_vision_max_images: int = Field(default=20, ge=1, le=50)
     ai_pdf_render_dpi: int = Field(default=144, ge=96, le=220)
 

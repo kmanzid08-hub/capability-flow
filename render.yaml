@@ -31,7 +31,19 @@ services:
       - key: DOCUMENT_STORAGE_PATH
         value: /var/data/documents
       - key: DOCUMENT_MAX_FILE_SIZE_MB
-        value: "25"
+        value: "250"
+      - key: AI_MAX_DOCUMENT_CHARS
+        value: "500000"
+      - key: AI_PDF_VISION_MAX_PAGES
+        value: "100"
+      - key: OPPORTUNITY_MAX_SOURCE_BYTES
+        value: "262144000"
+      - key: OPPORTUNITY_MAX_SOURCE_CHARACTERS
+        value: "2000000"
+      - key: OPPORTUNITY_ANALYSIS_CHUNK_CHARACTERS
+        value: "100000"
+      - key: OPPORTUNITY_ANALYSIS_CHUNK_OVERLAP
+        value: "5000"
       - key: AI_PROVIDER
         value: anthropic
       - key: ANTHROPIC_API_KEY
@@ -53,3 +65,4 @@ services:
       - type: rewrite
         source: /*
         destination: /index.html
+

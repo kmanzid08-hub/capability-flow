@@ -43,7 +43,12 @@ import {
     PageHeader,
     TextArea,
 } from "../components/ui";
-import { OPPORTUNITY_ANALYSIS_TIMEOUT_MS, api, apiDownload } from "../lib/api";
+import {
+    LARGE_UPLOAD_TIMEOUT_MS,
+    OPPORTUNITY_ANALYSIS_TIMEOUT_MS,
+    api,
+    apiDownload,
+} from "../lib/api";
 import type {
     CandidateMatch,
     CapabilityGap,
@@ -61,7 +66,8 @@ const wrapper =
 
 type IntakeMode =
     | "url"
-    | "text";
+    | "text"
+    | "file";
 
 type OpportunitySource = {
     id: string;
@@ -275,6 +281,8 @@ function IntakeForm({
         React.useState("");
     const [text, setText] =
         React.useState("");
+    const [sourceFile, setSourceFile] =
+        React.useState<File | null>(null);
 
     const mutation = useMutation({
         mutationFn: async () => {
@@ -290,6 +298,23 @@ function IntakeForm({
                         {
                             method: "POST",
                             body: JSON.stringify({ url: url.trim() }),
+                        },
+                    );
+                } else if (mode === "file") {
+                    if (!sourceFile) {
+                        throw new Error("Choose an opportunity document first.");
+                    }
+                    if (sourceFile.size > 250 * 1024 * 1024) {
+                        throw new Error("Opportunity documents can be up to 250 MB.");
+                    }
+                    const form = new FormData();
+                    form.append("file", sourceFile);
+                    source = await api(
+                        `/opportunities/${opportunityId}/sources/file`,
+                        {
+                            method: "POST",
+                            body: form,
+                            timeoutMs: LARGE_UPLOAD_TIMEOUT_MS,
                         },
                     );
                 } else {
@@ -332,6 +357,25 @@ function IntakeForm({
                             title: title.trim() || null,
                             client_name: clientName.trim() || null,
                         }),
+                    },
+                );
+            } else if (mode === "file") {
+                if (!sourceFile) {
+                    throw new Error("Choose an opportunity document first.");
+                }
+                if (sourceFile.size > 250 * 1024 * 1024) {
+                    throw new Error("Opportunity documents can be up to 250 MB.");
+                }
+                const form = new FormData();
+                form.append("file", sourceFile);
+                if (title.trim()) form.append("title", title.trim());
+                if (clientName.trim()) form.append("client_name", clientName.trim());
+                intake = await api<OpportunityIntakeResponse>(
+                    "/opportunities/intake/file",
+                    {
+                        method: "POST",
+                        body: form,
+                        timeoutMs: LARGE_UPLOAD_TIMEOUT_MS,
                     },
                 );
             } else {
@@ -411,7 +455,9 @@ function IntakeForm({
     const canSubmit =
         mode === "url"
             ? Boolean(url.trim())
-            : text.trim().length >= 20;
+            : mode === "file"
+                ? Boolean(sourceFile)
+                : text.trim().length >= 20;
 
     return (
         <section
@@ -498,6 +544,7 @@ function IntakeForm({
                     [
                         ["url", "Website URL", Link2],
                         ["text", "Paste text", FileText],
+                        ["file", "Upload file", Paperclip],
                     ] as const
                 ).map(([value, label, Icon]) => (
                     <button
@@ -550,6 +597,46 @@ function IntakeForm({
                             setText(event.target.value)
                         }
                     />
+                )}
+
+                {mode === "file" && (
+                    <label
+                        className={`block text-sm font-medium ${compact
+                            ? "text-slate-700"
+                            : "text-white/75"
+                            }`}
+                    >
+                        Tender, TOR, RFP or requirement document
+                        <input
+                            type="file"
+                            accept=".pdf,.docx,.xlsx,.xlsm,.pptx,.txt,.csv,.rtf"
+                            onChange={(event) => {
+                                const selected = event.target.files?.[0] ?? null;
+                                if (selected && selected.size > 250 * 1024 * 1024) {
+                                    event.currentTarget.value = "";
+                                    setSourceFile(null);
+                                    window.alert("Opportunity documents can be up to 250 MB.");
+                                    return;
+                                }
+                                setSourceFile(selected);
+                            }}
+                            className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink"
+                        />
+                        <span
+                            className={`mt-2 block text-xs ${compact
+                                ? "text-slate-400"
+                                : "text-white/45"
+                                }`}
+                        >
+                            Up to 250 MB. Large PDFs are analyzed in chunks instead of
+                            being sent to the AI provider as one oversized file.
+                        </span>
+                        {sourceFile && (
+                            <span className="mt-2 block text-xs font-semibold">
+                                {sourceFile.name} - {(sourceFile.size / (1024 * 1024)).toFixed(1)} MB
+                            </span>
+                        )}
+                    </label>
                 )}
 
             </div>
