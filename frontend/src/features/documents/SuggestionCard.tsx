@@ -1,0 +1,29 @@
+import { Check, ChevronDown, FileText, Pencil, X } from "lucide-react";
+import { Button } from "../../components/ui";
+import type { PersonDocument, ProfileSuggestion } from "../../types";
+import { readableSuggestionValue, suggestionFields, suggestionValidationHint } from "./suggestions";
+
+type Props = {
+  suggestion: ProfileSuggestion; source?: PersonDocument; expanded: boolean; isEditing: boolean;
+  busy: boolean; canReview: boolean; previewBusy: boolean; editPayload: Record<string, unknown>; note: string;
+  onToggle: () => void; onAccept: () => void; onReject: () => void; onEdit: () => void;
+  onSave: () => void; onCancel: () => void; onChange: (key: string, value: unknown) => void;
+  onNote: (value: string) => void; onPreview: (document: PersonDocument) => void;
+};
+export function SuggestionCard(props: Props) {
+  const { suggestion, source, expanded, isEditing, busy, canReview, editPayload, note } = props;
+  const fields = suggestionFields[suggestion.category];
+  const hint = suggestionValidationHint(suggestion);
+  const detail = suggestion.payload.institution || suggestion.payload.employer_name || suggestion.payload.client_name || suggestion.payload.issuer;
+  return <article className="cf-suggestion" tabIndex={0} aria-label={`Review ${suggestion.title}`} onKeyDown={(event) => {
+    if (event.target !== event.currentTarget || !canReview || busy || isEditing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key.toLowerCase() === "a") { event.preventDefault(); props.onAccept(); }
+    if (event.key.toLowerCase() === "e") { event.preventDefault(); props.onEdit(); }
+    if (event.key.toLowerCase() === "r") { event.preventDefault(); props.onReject(); }
+  }}><div className="cf-suggestion-header"><div className="min-w-0 flex-1"><p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1.5">{suggestion.category}{suggestion.confidence != null ? ` / AI confidence ${Math.round(suggestion.confidence * 100)}%` : ""}</p><button className="text-left text-sm font-semibold" onClick={props.onToggle} aria-expanded={expanded}><span>{suggestion.title}</span></button>{detail != null && <p className="text-xs text-slate-500 mt-1">{String(detail)}</p>}<div className="mt-2 flex items-center gap-1 text-[11px] text-slate-400"><FileText size={11} />{source ? <button disabled={props.previewBusy} className="truncate max-w-sm hover:underline" onClick={() => props.onPreview(source)}>{source.title}</button> : "Source document"}</div></div><div className="flex items-center gap-2 shrink-0">{canReview && !isEditing && <><Button secondary disabled={busy} onClick={props.onAccept} title="Accept suggestion (A when card is focused)"><Check size={13} />Accept</Button><button className="cf-icon-button" disabled={busy} aria-label={`Edit ${suggestion.title}`} title="Edit (E when focused)" onClick={props.onEdit}><Pencil size={14} /></button><button className="cf-icon-button hover:text-red-700" disabled={busy} aria-label={`Reject ${suggestion.title}`} title="Reject (R when focused)" onClick={props.onReject}><X size={15} /></button></>}<button className="cf-icon-button" aria-label={expanded ? `Collapse ${suggestion.title}` : `Expand ${suggestion.title}`} aria-expanded={expanded} onClick={props.onToggle}><ChevronDown size={16} className={expanded ? "rotate-180" : ""} /></button></div></div>
+    {expanded && <div className="cf-suggestion-body">{hint && <p className="cf-alert mb-5 text-amber-800">{hint}</p>}{isEditing ? <div className="grid gap-4 sm:grid-cols-2">{fields.map((field) => { const value = editPayload[field.key]; if (field.kind === "checkbox") return <label key={field.key} className="flex items-center gap-3 text-sm sm:col-span-2"><input type="checkbox" checked={Boolean(value)} onChange={(event) => props.onChange(field.key, event.target.checked)} />{field.label}</label>; if (field.kind === "select") return <label className="cf-field" key={field.key}><span>{field.label}</span><select className="cf-input" value={value == null ? "" : String(value)} onChange={(event) => props.onChange(field.key, event.target.value)}>{value != null && !field.options?.some((o) => o.value === String(value)) && <option value={String(value)}>{String(value)} (source value)</option>}{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>; return <label key={field.key} className={`cf-field ${field.kind === "textarea" ? "sm:col-span-2" : ""}`}><span>{field.label}</span>{field.kind === "textarea" ? <textarea className="cf-input" rows={3} value={value == null ? "" : String(value)} onChange={(event) => props.onChange(field.key, event.target.value)} /> : <input className="cf-input" type={field.kind === "number" ? "number" : "text"} value={value == null ? "" : String(value)} onChange={(event) => props.onChange(field.key, event.target.value)} placeholder={field.kind === "date" ? "YYYY, YYYY-MM, or YYYY-MM-DD" : field.placeholder} />}</label>; })}</div> : <dl className="grid sm:grid-cols-2 gap-x-8 gap-y-4">{fields.map((field) => <div key={field.key} className={field.kind === "textarea" ? "sm:col-span-2" : ""}><dt className="text-slate-400 uppercase">{field.label}</dt><dd className="mt-1 whitespace-pre-line leading-6 text-slate-700">{readableSuggestionValue(suggestion.payload[field.key])}</dd></div>)}</dl>}
+      {canReview && <label className="cf-field mt-5"><span>Review note <span className="font-normal text-slate-400">(optional)</span></span><textarea className="cf-input" rows={2} value={note} onChange={(event) => props.onNote(event.target.value)} placeholder="Record a correction or your reason for accepting." /></label>}
+      {isEditing && <div className="mt-5 flex justify-end gap-2"><Button secondary disabled={busy} onClick={props.onCancel}>Cancel</Button><Button disabled={busy} onClick={props.onSave}><Check size={14} />Save &amp; accept</Button></div>}
+    </div>}
+  </article>;
+}

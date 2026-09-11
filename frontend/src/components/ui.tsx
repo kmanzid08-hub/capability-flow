@@ -1,110 +1,38 @@
-import {
-    forwardRef,
-    type ButtonHTMLAttributes,
-    type InputHTMLAttributes,
-    type ReactNode,
-    type TextareaHTMLAttributes,
-} from "react";
+import { forwardRef, useId, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from "react";
 
-type PageHeaderProps = {
-    eyebrow: string;
-    title: string;
-    children?: ReactNode;
-    action?: ReactNode;
-};
-
-export function PageHeader({
-    eyebrow,
-    title,
-    children,
-    action,
-}: PageHeaderProps) {
-    return (
-        <header className="mb-8 flex flex-col justify-between gap-5 border-b border-black/10 pb-7 sm:flex-row sm:items-end">
-            <div>
-                <p className="mb-2 text-xs font-bold uppercase tracking-[.2em] text-evergreen">
-                    {eyebrow}
-                </p>
-
-                <h1 className="font-serif text-4xl tracking-tight">{title}</h1>
-
-                {children && (
-                    <p className="mt-2 max-w-2xl text-sm text-slate-500">
-                        {children}
-                    </p>
-                )}
-            </div>
-
-            {action}
-        </header>
-    );
+export function PageHeader({ eyebrow, title, children, action }: {
+  eyebrow?: string; title: string; children?: ReactNode; action?: ReactNode;
+}) {
+  return <header className="cf-page-header">
+    <div className="min-w-0">
+      {eyebrow && <p className="cf-eyebrow">{eyebrow}</p>}
+      <h1>{title}</h1>
+      {children && <p className="cf-page-description">{children}</p>}
+    </div>
+    {action && <div className="cf-header-actions">{action}</div>}
+  </header>;
 }
 
-type FieldProps = InputHTMLAttributes<HTMLInputElement> & {
-    label: string;
-    error?: string;
-};
+type FieldProps = InputHTMLAttributes<HTMLInputElement> & { label: string; error?: string; };
+export const Field = forwardRef<HTMLInputElement, FieldProps>(function Field({ label, error, className = "", id, ...props }, ref) {
+  const uid = useId();
+  const inputId = id ?? uid;
+  return <label className="cf-field" htmlFor={inputId}>
+    <span>{label}{props.required && <span aria-hidden="true" className="text-slate-400"> *</span>}</span>
+    <input {...props} ref={ref} id={inputId} aria-invalid={error ? true : undefined}
+      aria-describedby={error ? `${inputId}-error` : props["aria-describedby"]} className={`cf-input ${className}`} />
+    {error && <span id={`${inputId}-error`} className="cf-field-error">{error}</span>}
+  </label>;
+});
 
-export const Field = forwardRef<HTMLInputElement, FieldProps>(
-    function Field({ label, error, ...props }, ref) {
-        return (
-            <label className="block text-sm font-medium text-slate-700">
-                {label}
+type TextAreaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { label: string; };
+export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(function TextArea({ label, className = "", id, ...props }, ref) {
+  const uid = useId();
+  return <label className="cf-field" htmlFor={id ?? uid}><span>{label}</span>
+    <textarea {...props} id={id ?? uid} ref={ref} className={`cf-input cf-textarea ${className}`} />
+  </label>;
+});
 
-                <input
-                    ref={ref}
-                    {...props}
-                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none transition focus:border-evergreen focus:ring-2 focus:ring-evergreen/10"
-                />
-
-                {error && (
-                    <span className="mt-1 block text-xs text-red-600">
-                        {error}
-                    </span>
-                )}
-            </label>
-        );
-    },
-);
-
-type TextAreaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
-    label: string;
-};
-
-export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(
-    function TextArea({ label, ...props }, ref) {
-        return (
-            <label className="block text-sm font-medium text-slate-700">
-                {label}
-
-                <textarea
-                    ref={ref}
-                    {...props}
-                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-evergreen focus:ring-2 focus:ring-evergreen/10"
-                />
-            </label>
-        );
-    },
-);
-
-type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
-    secondary?: boolean;
-};
-
-export function Button({
-    children,
-    secondary = false,
-    ...props
-}: ButtonProps) {
-    return (
-        <button
-            {...props}
-            className={`rounded-xl px-5 py-3 text-sm font-semibold transition disabled:opacity-50 ${secondary
-                ? "border border-slate-200 bg-white hover:bg-slate-50"
-                : "bg-evergreen text-white hover:bg-[#103d37]"
-                }`}
-        >
-            {children}
-        </button>
-    );
+export function Button({ children, secondary = false, danger = false, className = "", type = "button", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { secondary?: boolean; danger?: boolean; }) {
+  return <button {...props} type={type} className={`cf-button ${danger ? "cf-button-danger" : secondary ? "cf-button-secondary" : "cf-button-primary"} ${className}`}>{children}</button>;
 }

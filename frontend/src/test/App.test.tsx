@@ -5,7 +5,7 @@ import { expect, test } from "vitest";
 
 import { App } from "../App";
 
-test("renders the login route", () => {
+test("renders the lazy-loaded login route", async () => {
   localStorage.clear();
 
   const queryClient = new QueryClient({
@@ -25,7 +25,7 @@ test("renders the login route", () => {
   );
 
   expect(
-    screen.getByRole("heading", {
+    await screen.findByRole("heading", {
       name: "Welcome back",
     }),
   ).toBeInTheDocument();

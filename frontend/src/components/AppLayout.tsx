@@ -1,318 +1,78 @@
-import {
-  Building2,
-  ChevronsUpDown,
-  Gauge,
-  GitBranch,
-  LogOut,
-  Plus,
-  Radar,
-  Users,
-  X,
-} from "lucide-react";
-import React from "react";
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import {
-  NavLink,
-  Outlet,
-  useNavigate,
-} from "react-router-dom";
-
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { BriefcaseBusiness, ChevronsUpDown, GitBranch, Layers2, LayoutDashboard, LogOut, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings2, Users, WifiOff } from "lucide-react";
+import { Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { session } from "../lib/session";
-import type { CurrentUser } from "../types";
+import { useWorkspace } from "../lib/workspace";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { CommandPalette } from "./layout/CommandPalette";
+import { Button, Field } from "./ui";
+import { Avatar } from "./ui/Avatar";
+import { Modal } from "./ui/Modal";
+import { PageSkeleton } from "./ui/Skeleton";
 
 const navItems = [
-  { to: "/", label: "Dashboard", icon: Gauge, end: true },
-  { to: "/opportunities", label: "Opportunities", icon: Radar, end: false },
-  { to: "/pipeline", label: "Pipeline", icon: GitBranch, end: false },
+  { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/people", label: "People", icon: Users, end: false },
-  { to: "/organization", label: "Organization", icon: Building2, end: false },
+  { to: "/opportunities", label: "Opportunities", icon: BriefcaseBusiness, end: false },
+  { to: "/pipeline", label: "Pipeline", icon: GitBranch, end: false },
+  { to: "/organization", label: "Settings", icon: Settings2, end: false },
 ];
-
-type WorkspaceResponse = {
-  id: string;
-  name: string;
-  slug: string;
-  status: string;
-  membership_id: string;
-  role: string;
-};
-
-function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/-{2,}/g, "-");
-}
-
+function slugify(value: string) { return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
 export function AppLayout() {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-
-  const [creatingWorkspace, setCreatingWorkspace] = React.useState(false);
-  const [workspaceName, setWorkspaceName] = React.useState("");
-  const [workspaceSlug, setWorkspaceSlug] = React.useState("");
-  const [workspaceError, setWorkspaceError] = React.useState<string | null>(null);
-
-  const currentOrganizationId = session.organization();
-
-  const userQuery = useQuery({
-    queryKey: ["current-user"],
-    queryFn: () => api<CurrentUser>("/auth/me"),
-    staleTime: 5 * 60 * 1000,
-  });
-
-  const organizationQuery = useQuery({
-    queryKey: ["current-organization", currentOrganizationId],
-    queryFn: () => api<WorkspaceResponse>("/organizations/current"),
-    staleTime: 5 * 60 * 1000,
-    enabled: Boolean(currentOrganizationId),
-  });
-
-  const createWorkspace = useMutation({
-    mutationFn: () =>
-      api<WorkspaceResponse>("/organizations", {
-        method: "POST",
-        body: JSON.stringify({
-          name: workspaceName.trim(),
-          slug: workspaceSlug.trim(),
-        }),
-      }),
-    onSuccess: (workspace) => {
-      session.setOrganization(workspace.id);
-      setCreatingWorkspace(false);
-      setWorkspaceName("");
-      setWorkspaceSlug("");
-      setWorkspaceError(null);
-      queryClient.clear();
-      navigate("/", { replace: true });
-    },
-    onError: (error) => {
-      setWorkspaceError(
-        error instanceof Error ? error.message : "Workspace creation failed.",
-      );
-    },
-  });
-
-  const switchWorkspace = (organizationId: string) => {
-    if (!organizationId || organizationId === currentOrganizationId) {
-      return;
+  const navigate = useNavigate(); const location = useLocation(); const queryClient = useQueryClient();
+  const snapshot = useSyncExternalStore(session.subscribe, session.snapshot, () => "");
+  const previousToken = useRef(session.token());
+  useEffect(() => {
+    if (previousToken.current !== session.token()) {
+      previousToken.current = session.token();
+      void queryClient.cancelQueries().then(() => queryClient.clear());
     }
-
-    session.setOrganization(organizationId);
-    queryClient.clear();
-    navigate("/", { replace: true });
+  }, [snapshot, queryClient]);
+  const { user, membership } = useWorkspace();
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState(""); const [slug, setSlug] = useState("");
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("cf-sidebar-collapsed") === "1");
+  const [offline, setOffline] = useState(!navigator.onLine);
+  const active = navItems.find((item) => item.end ? location.pathname === item.to : location.pathname.startsWith(item.to));
+  const closeCommand = useCallback(() => setCommandOpen(false), []);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setCommandOpen((v) => !v); } };
+    const on = () => setOffline(false); const off = () => setOffline(true);
+    document.addEventListener("keydown", handler); window.addEventListener("online", on); window.addEventListener("offline", off);
+    return () => { document.removeEventListener("keydown", handler); window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+  useEffect(() => { document.title = `${active?.label ?? "Workspace"} - Capability Flow`; }, [active?.label]);
+  const switchWorkspace = async (id: string) => {
+    if (!id || id === session.organization()) return;
+    await queryClient.cancelQueries(); queryClient.clear(); session.setOrganization(id); navigate("/", { replace: true });
   };
-
-  const logout = () => {
-    session.clear();
-    queryClient.clear();
-    navigate("/login", { replace: true });
-  };
-
-  const memberships = userQuery.data?.memberships ?? [];
-
-  return (
-    <div className="min-h-screen bg-[#f8f7f2] text-ink lg:grid lg:grid-cols-[260px_1fr]">
-      <aside className="border-b border-white/10 bg-ink text-white lg:sticky lg:top-0 lg:h-screen lg:border-b-0 lg:border-r">
-        <div className="flex items-center justify-between px-6 py-5 lg:block lg:px-7 lg:py-8">
-          <NavLink to="/" className="flex items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-xl bg-coral font-serif text-lg">
-              C
-            </span>
-            <span>
-              <span className="block font-serif text-lg">Capability Flow</span>
-              <span className="block text-[11px] uppercase tracking-[.18em] text-white/35">
-                Capability intelligence
-              </span>
-            </span>
-          </NavLink>
-
-          <button
-            type="button"
-            onClick={logout}
-            className="rounded-lg p-2 text-white/50 hover:bg-white/10 hover:text-white lg:hidden"
-            aria-label="Sign out"
-          >
-            <LogOut size={18} />
-          </button>
-        </div>
-
-        <div className="mx-4 mb-5 rounded-xl border border-white/10 bg-white/5 p-3">
-          <div className="mb-2 flex items-center gap-2 text-[11px] font-bold uppercase tracking-[.14em] text-white/35">
-            <ChevronsUpDown size={13} />
-            Workspace
-          </div>
-
-          {userQuery.isLoading ? (
-            <p className="py-2 text-sm text-white/45">Loading…</p>
-          ) : memberships.length ? (
-            <select
-              aria-label="Current workspace"
-              value={currentOrganizationId ?? ""}
-              onChange={(event) => switchWorkspace(event.target.value)}
-              className="w-full rounded-lg border border-white/10 bg-ink px-3 py-2.5 text-sm font-semibold text-white outline-none"
-            >
-              {memberships.map((membership) => (
-                <option
-                  key={membership.organization_id}
-                  value={membership.organization_id}
-                >
-                  {membership.organization_name}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <p className="py-2 text-sm text-white/45">No active workspace</p>
-          )}
-
-          <p className="mt-2 truncate text-xs text-white/35">
-            {organizationQuery.data
-              ? `${organizationQuery.data.role} · ${organizationQuery.data.slug}`
-              : "Private organization workspace"}
-          </p>
-
-          <button
-            type="button"
-            onClick={() => {
-              setWorkspaceError(null);
-              setCreatingWorkspace(true);
-            }}
-            className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white/70 hover:bg-white/15 hover:text-white"
-          >
-            <Plus size={14} />
-            New workspace
-          </button>
-        </div>
-
-        <nav className="flex gap-1 overflow-x-auto px-4 pb-4 lg:block lg:space-y-1 lg:px-4">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  [
-                    "flex shrink-0 items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition",
-                    isActive
-                      ? "bg-white text-ink"
-                      : "text-white/55 hover:bg-white/10 hover:text-white",
-                  ].join(" ")
-                }
-              >
-                <Icon size={18} />
-                {item.label}
-              </NavLink>
-            );
-          })}
-        </nav>
-
-        <div className="absolute bottom-0 left-0 right-0 hidden p-4 lg:block">
-          <button
-            type="button"
-            onClick={logout}
-            className="flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-white/45 hover:bg-white/10 hover:text-white"
-          >
-            <LogOut size={18} />
-            Sign out
-          </button>
-        </div>
-      </aside>
-
-      <main className="min-w-0">
-        <Outlet />
-      </main>
-
-      {creatingWorkspace && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/35 p-5">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="font-serif text-2xl">Create workspace</h2>
-                <p className="mt-1 text-sm leading-6 text-slate-500">
-                  This creates a completely separate organization workspace under
-                  your existing account.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setCreatingWorkspace(false)}
-                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100"
-                aria-label="Close"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <label className="mt-5 block text-sm font-medium text-slate-700">
-              Organization name
-              <input
-                value={workspaceName}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setWorkspaceName(value);
-
-                  if (!workspaceSlug || workspaceSlug === slugify(workspaceName)) {
-                    setWorkspaceSlug(slugify(value));
-                  }
-                }}
-                className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-evergreen"
-                placeholder="Acme Advisory"
-              />
-            </label>
-
-            <label className="mt-4 block text-sm font-medium text-slate-700">
-              Workspace slug
-              <input
-                value={workspaceSlug}
-                onChange={(event) =>
-                  setWorkspaceSlug(slugify(event.target.value))
-                }
-                className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-evergreen"
-                placeholder="acme-advisory"
-              />
-            </label>
-
-            {workspaceError && (
-              <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
-                {workspaceError}
-              </p>
-            )}
-
-            <div className="mt-6 flex gap-3">
-              <button
-                type="button"
-                disabled={
-                  createWorkspace.isPending ||
-                  workspaceName.trim().length < 2 ||
-                  workspaceSlug.trim().length < 2
-                }
-                onClick={() => createWorkspace.mutate()}
-                className="rounded-xl bg-evergreen px-5 py-3 text-sm font-semibold text-white disabled:opacity-50"
-              >
-                {createWorkspace.isPending ? "Creating…" : "Create workspace"}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setCreatingWorkspace(false)}
-                className="rounded-xl border border-slate-200 px-5 py-3 text-sm font-semibold"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+  const create = useMutation({ mutationFn: () => api<{ id: string; }>("/organizations", { method: "POST", body: JSON.stringify({ name: name.trim(), slug: slug.trim() }) }), onSuccess: async (workspace) => { setCreating(false); setName(""); setSlug(""); await switchWorkspace(workspace.id); } });
+  const logout = async () => { await queryClient.cancelQueries(); queryClient.clear(); session.clear(); navigate("/login", { replace: true }); };
+  return <div className={`cf-shell ${collapsed ? "cf-shell-collapsed" : ""}`}>
+    <a href="#workspace-main" className="cf-skip-link">Skip to content</a>
+    <aside className="cf-sidebar">
+      <NavLink to="/" className="cf-brand" aria-label="Capability Flow home"><span className="cf-logo"><Layers2 size={16} strokeWidth={1.8} /></span><span className="cf-sidebar-label">Capability<span className="font-normal text-slate-400"> Flow</span></span></NavLink>
+      <div className="cf-workspace-switch"><div className="flex items-center gap-2"><ChevronsUpDown size={14} className="text-slate-400 shrink-0" /><select aria-label="Current workspace" value={session.organization() ?? ""} onChange={(e) => void switchWorkspace(e.target.value)}>
+        {!user.data?.memberships.length && <option value={session.organization() ?? ""}>{user.isPending ? "Loading workspace..." : "Workspace"}</option>}
+        {user.data?.memberships.map((m) => <option key={m.organization_id} value={m.organization_id}>{m.organization_name}</option>)}
+      </select></div><button className="cf-new-workspace cf-sidebar-label" onClick={() => { create.reset(); setCreating(true); }}><Plus size={13} />New workspace</button></div>
+      <p className="cf-nav-label cf-sidebar-label">WORKSPACE</p>
+      <nav className="cf-navigation" aria-label="Primary navigation">{navItems.map(({ icon: Icon, ...item }) => <NavLink key={item.to} to={item.to} end={item.end} title={collapsed ? item.label : undefined} className={({ isActive }) => `cf-nav-item ${isActive ? "cf-nav-active" : ""}`}><Icon size={18} strokeWidth={1.65} /><span className="cf-sidebar-label">{item.label}</span></NavLink>)}</nav>
+      <div className="cf-sidebar-bottom"><div className="cf-user"><Avatar name={user.data?.full_name ?? "User"} /><div className="cf-sidebar-label min-w-0 flex-1"><p className="truncate text-xs font-semibold">{user.data?.full_name ?? "Your account"}</p><p className="mt-0.5 truncate text-[11px] text-slate-400 capitalize">{membership?.role ?? "Workspace member"}</p></div><button className="cf-icon-button cf-sidebar-label" aria-label="Sign out" onClick={() => void logout()}><LogOut size={16} /></button></div>
+        <button className="cf-collapse-button" onClick={() => setCollapsed((value) => { localStorage.setItem("cf-sidebar-collapsed", value ? "0" : "1"); return !value; })} aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}>{collapsed ? <PanelLeftOpen size={16} /> : <><PanelLeftClose size={16} /><span>Collapse sidebar</span></>}</button></div>
+    </aside>
+    <div className="cf-content"><header className="cf-topbar"><div className="flex items-center gap-2 min-w-0"><span className="cf-mobile-brand cf-logo"><Layers2 size={15} /></span><span className="truncate text-xs text-slate-400">{membership?.organization_name ?? "Workspace"}</span><span className="text-slate-300">/</span><span className="text-xs font-medium">{active?.label ?? "Details"}</span></div><div className="flex items-center gap-5"><button className="cf-topbar-search" onClick={() => setCommandOpen(true)} aria-label="Search workspace (Control or Command K)"><Search size={15} /><span>Search anything</span><kbd>Ctrl K</kbd></button><button className="cf-icon-button" aria-label="Account and workspaces" onClick={() => setAccountOpen(true)}><Avatar name={user.data?.full_name ?? "User"} /></button></div></header>
+      {offline && <div className="cf-offline" role="status"><WifiOff size={14} /> You are offline. Saved records will refresh when you reconnect.</div>}
+      {user.error && <div className="px-6 pt-4"><div className="cf-alert cf-alert-error">{user.error.message} <button className="underline" onClick={() => void logout()}>Sign in again</button></div></div>}
+      <main id="workspace-main" key={snapshot} tabIndex={-1}><ErrorBoundary><Suspense fallback={<PageSkeleton />}><Outlet /></Suspense></ErrorBoundary></main>
     </div>
-  );
+    <nav className="cf-mobile-nav" aria-label="Mobile navigation">{navItems.map(({ icon: Icon, ...item }) => <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => isActive ? "active" : ""}><Icon size={19} strokeWidth={1.6} /><span>{item.label}</span></NavLink>)}<button onClick={() => setCreating(true)} aria-label="Workspace menu" className="sr-only">Workspace</button></nav>
+    {accountOpen && <Modal title="Your account" onClose={() => setAccountOpen(false)}><div className="flex gap-3 items-center mb-5"><Avatar name={user.data?.full_name ?? "User"} /><div><p className="font-medium">{user.data?.full_name}</p><p className="text-xs text-slate-400">{user.data?.email}</p></div></div><label className="cf-field"><span>Workspace</span><select className="cf-input" value={session.organization() ?? ""} onChange={(e) => { setAccountOpen(false); void switchWorkspace(e.target.value); }}>{user.data?.memberships.map((m) => <option key={m.organization_id} value={m.organization_id}>{m.organization_name}</option>)}</select></label><div className="mt-6 flex flex-wrap gap-2"><Button secondary onClick={() => { setAccountOpen(false); setCreating(true); }}><Plus size={14} />New workspace</Button><Button secondary onClick={() => void logout()}><LogOut size={14} />Sign out</Button></div></Modal>}
+    {commandOpen && <CommandPalette onClose={closeCommand} />}
+    {creating && <Modal title="Create a workspace" onClose={() => setCreating(false)} busy={create.isPending}><p className="text-sm text-slate-500 mb-6">A separate, private organization under your existing account.</p><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}><Field label="Organization name" required value={name} onChange={(e) => { const next = e.target.value; setName(next); if (!slug || slug === slugify(name)) setSlug(slugify(next)); }} autoFocus placeholder="Acme Advisory" /><Field label="Workspace slug" required value={slug} onChange={(e) => setSlug(slugify(e.target.value))} placeholder="acme-advisory" />{create.error && <p className="cf-alert cf-alert-error">{create.error.message}</p>}<div className="flex gap-2 pt-3"><Button type="submit" disabled={create.isPending || name.trim().length < 2 || slug.trim().length < 2}>{create.isPending ? "Creating..." : "Create workspace"}</Button><Button secondary onClick={() => setCreating(false)} disabled={create.isPending}>Cancel</Button></div></form></Modal>}
+  </div>;
 }
