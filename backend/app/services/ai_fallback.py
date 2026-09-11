@@ -46,7 +46,7 @@ class FallbackAI:
     def _is_hard_rate_limit(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
         message = str(exc).lower()
-        return status_code == 429 or any(
+        return status_code in (413, 429) or any(
             token in message
             for token in (
                 "rate limit",
@@ -55,6 +55,10 @@ class FallbackAI:
                 "tpm",
                 "quota",
                 "too many requests",
+                "request too large",
+                "context length",
+                "maximum context",
+                "token limit",
             )
         )
 
@@ -593,9 +597,7 @@ class FallbackAI:
         choice = response.choices[0]
         finish_reason = getattr(choice, "finish_reason", None)
         if finish_reason in {"length", "max_tokens"}:
-            raise AIOutputTruncated(
-                "provider stopped because the output token limit was reached"
-            )
+            raise AIOutputTruncated("provider stopped because the output token limit was reached")
 
         message = choice.message
         content = message.content

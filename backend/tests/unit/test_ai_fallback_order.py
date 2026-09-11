@@ -111,4 +111,3 @@ async def test_openai_retries_truncated_json_with_larger_output_budget(
     assert token_limits == [6000, 12000]
     assert data == {"ok": True}
     assert provider == "openai:gpt-5.6-luna"
-
