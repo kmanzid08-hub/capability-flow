@@ -178,12 +178,13 @@ class FallbackAI:
                 if last_error is not None:
                     raise last_error
             except Exception as exc:
+                exc_type = type(exc).__name__
                 logger.warning(
                     "Groq image text recovery failed: label=%s error=%s",
                     label,
                     str(exc),
                 )
-                errors.append(f"groq: {type(exc).__name__}")
+                errors.append(f"groq: {exc_type}")
 
         if self.settings.openai_api_key:
             try:
@@ -257,26 +258,36 @@ class FallbackAI:
         user_prompt: str,
         schema: dict[str, Any],
         max_tokens: int,
+        mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
         # Keep the free providers tightly bounded. OpenAI Luna is the paid safety net
         # and receives a larger ceiling only after the free providers are exhausted.
         free_max_tokens = min(max_tokens, 3500)
         errors: list[str] = []
 
-        if self.settings.groq_api_key:
-            try:
-                return await self._generate_groq(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    max_tokens=free_max_tokens,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "AI fallback provider exhausted: provider=groq error=%s",
-                    str(exc),
-                )
-                errors.append(f"groq: {type(exc).__name__}")
+        # Large opportunity analysis should not start with Groq because of strict
+        # context limits. Use the stronger providers first.
+        providers = (
+            ["openai", "openrouter", "groq"]
+            if mode == "opportunity"
+            else ["groq", "openrouter", "openai"]
+        )
+
+        for provider in providers:
+            if provider == "groq" and self.settings.groq_api_key:
+                try:
+                    return await self._generate_groq(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema=schema,
+                        max_tokens=free_max_tokens,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "AI fallback provider exhausted: provider=groq error=%s",
+                        str(exc),
+                    )
+                    errors.append(f"groq: {type(exc).__name__}")
 
         if self.settings.openrouter_api_key:
             try:
@@ -319,6 +330,7 @@ class FallbackAI:
         user_prompt: str,
         schema: dict[str, Any],
         max_tokens: int,
+        mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
         key = self.settings.openai_api_key
         if not key:
@@ -387,6 +399,7 @@ class FallbackAI:
         user_prompt: str,
         schema: dict[str, Any],
         max_tokens: int,
+        mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
         key = self.settings.groq_api_key
         if not key:
@@ -454,6 +467,7 @@ class FallbackAI:
         user_prompt: str,
         schema: dict[str, Any],
         max_tokens: int,
+        mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
         key = self.settings.openrouter_api_key
         if not key:
