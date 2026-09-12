@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -15,6 +16,22 @@ from app.models.enums import ProfileStatus
 from app.models.experience import EmploymentExperience, ProjectExperience
 from app.models.opportunity_enums import MatchStatus, RequirementImportance, RequirementType
 from app.models.person import Person
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_months_between_partial(start_date: str | None, end_date: str | None) -> int:
+    if not start_date or not end_date:
+        return 0
+    try:
+        return months_between_partial(start_date, end_date)
+    except Exception:
+        logger.warning(
+            "Ignoring invalid experience dates during matching: start=%s end=%s",
+            start_date,
+            end_date,
+        )
+        return 0
 
 
 class RequirementLike(Protocol):
@@ -597,7 +614,7 @@ class MatchingEngine:
             if employment_strength(item) >= 0.75
         ]
         months = sum(
-            months_between_partial(
+            _safe_months_between_partial(
                 item.start_date,
                 item.end_date or date.today().isoformat(),
             )
@@ -701,7 +718,7 @@ class MatchingEngine:
         if req.minimum_years:
             years = (
                 sum(
-                    months_between_partial(
+                    _safe_months_between_partial(
                         item.start_date,
                         item.end_date or date.today().isoformat(),
                     )
