@@ -8,8 +8,30 @@ from pydantic import ValidationError
 
 from app.core.config import get_settings
 from app.core.opportunity_config import get_opportunity_intelligence_settings
+from app.core.partial_dates import normalize_partial_date
 from app.schemas.opportunity import ExtractedOpportunity
 from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
+
+
+def _normalize_opportunity_dates(payload: dict[str, Any]) -> dict[str, Any]:
+    date_fields = (
+        "deadline_at",
+        "start_date",
+        "end_date",
+        "contract_start_date",
+        "contract_end_date",
+    )
+
+    cleaned = dict(payload)
+
+    for field in date_fields:
+        if cleaned.get(field):
+            try:
+                cleaned[field] = normalize_partial_date(cleaned[field])
+            except Exception:
+                cleaned[field] = None
+
+    return cleaned
 
 
 class RequirementExtractionError(RuntimeError):
