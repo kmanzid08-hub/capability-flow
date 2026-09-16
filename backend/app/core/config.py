@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     ai_max_document_chars: int = Field(default=500_000, ge=10_000, le=2_000_000)
     ai_large_pdf_direct_max_mb: int = Field(default=45, ge=5, le=50)
     ai_large_document_chunk_chars: int = Field(default=60_000, ge=10_000, le=120_000)
+    ai_profile_chunk_chars: int = Field(default=12_000, ge=6_000, le=30_000)
     ai_pdf_vision_max_pages: int = Field(default=100, ge=1, le=250)
     ai_docx_vision_max_images: int = Field(default=20, ge=1, le=50)
     ai_pdf_render_dpi: int = Field(default=144, ge=96, le=220)

@@ -537,11 +537,16 @@ class ProfileAIService:
         content: bytes,
         text: str | None,
         pdf_path: Path | None = None,
+        force_fallback: bool = False,
     ) -> dict[str, Any]:
-        if text and len(text) > self.settings.ai_large_document_chunk_chars:
+        # Large profile documents must be analyzed as bounded evidence chunks.
+        # Sending the entire CV to one structured-output call can exhaust the
+        # model's output budget even when the input fits the context window.
+        profile_chunk_limit = self.settings.ai_profile_chunk_chars
+        if text and len(text) > profile_chunk_limit:
             chunks = self._chunk_fallback_text(
                 text,
-                max_chars=self.settings.ai_large_document_chunk_chars,
+                max_chars=profile_chunk_limit,
             )
             large_results: list[dict[str, Any]] = []
             for index, chunk in enumerate(chunks, start=1):
@@ -557,6 +562,7 @@ class ProfileAIService:
                         document=document,
                         content=b"",
                         text=chunk,
+                        force_fallback=True,
                     )
                 )
             merged = self._merge_extractions(large_results)
@@ -567,7 +573,7 @@ class ProfileAIService:
             return merged
 
         gemini_error: Exception | None = None
-        if self.settings.gemini_api_key:
+        if self.settings.gemini_api_key and not force_fallback:
             try:
                 return await self._call_gemini(person, document, content, text)
             except (GeminiTemporarilyUnavailable, GeminiNoUsableEvidence) as exc:
@@ -633,7 +639,8 @@ class ProfileAIService:
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     schema=AIProfileExtraction.model_json_schema(),
-                    max_tokens=2200,
+                    max_tokens=3000,
+                    mode="profile",
                 )
                 parsed = AIProfileExtraction.model_validate(data)
                 results.append(parsed.model_dump(mode="json"))
@@ -840,7 +847,7 @@ class ProfileAIService:
         )
 
     @staticmethod
-    def _chunk_fallback_text(text: str, max_chars: int = 20_000) -> list[str]:
+    def _chunk_fallback_text(text: str, max_chars: int = 12_000) -> list[str]:
         text = text.strip()
         if len(text) <= max_chars:
             return [text]
