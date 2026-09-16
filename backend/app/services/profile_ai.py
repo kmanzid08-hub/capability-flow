@@ -253,6 +253,84 @@ class AIProfileExtraction(BaseModel):
     projects: list[AIProject]
 
 
+class AIChunkProfileDetails(BaseModel):
+    summary: str | None = None
+    professional_title: str | None = None
+    nationality: str | None = None
+    country_of_residence: str | None = None
+
+
+class AIChunkSkill(BaseModel):
+    name: str
+    proficiency: str | None = None
+    years_experience: float | None = None
+    last_used_year: int | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIChunkEducation(BaseModel):
+    degree_level: str
+    degree_name: str | None = None
+    field_of_study: str | None = None
+    institution: str
+    country: str | None = None
+    start_date: str | None = None
+    graduation_date: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIChunkCertification(BaseModel):
+    name: str
+    issuer: str | None = None
+    credential_id: str | None = None
+    issue_date: str | None = None
+    expiry_date: str | None = None
+    verification_url: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIChunkEmployment(BaseModel):
+    employer_name: str
+    job_title: str
+    employment_type: str | None = None
+    industry: str | None = None
+    location: str | None = None
+    country: str | None = None
+    start_date: str
+    end_date: str | None = None
+    is_current: bool
+    description: str | None = None
+    responsibilities: str | None = None
+    achievements: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIChunkProject(BaseModel):
+    project_name: str
+    client_name: str | None = None
+    role: str
+    sector: str | None = None
+    location: str | None = None
+    country: str | None = None
+    start_date: str
+    end_date: str | None = None
+    is_current: bool
+    description: str | None = None
+    responsibilities: str | None = None
+    outcomes: str | None = None
+    skills_summary: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AIProfileChunkExtraction(BaseModel):
+    profile: AIChunkProfileDetails
+    skills: list[AIChunkSkill]
+    education: list[AIChunkEducation]
+    certifications: list[AIChunkCertification]
+    employment: list[AIChunkEmployment]
+    projects: list[AIChunkProject]
+
+
 class ProfileAIService:
     def __init__(
         self,
@@ -638,11 +716,11 @@ class ProfileAIService:
                 data, provider = await self.fallback_ai.generate_json(
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
-                    schema=AIProfileExtraction.model_json_schema(),
-                    max_tokens=1800,
+                    schema=AIProfileChunkExtraction.model_json_schema(),
+                    max_tokens=1200,
                     mode="profile",
                 )
-                parsed = AIProfileExtraction.model_validate(data)
+                parsed = AIProfileChunkExtraction.model_validate(data)
                 results.append(parsed.model_dump(mode="json"))
                 providers.append(provider)
                 logger.info(
