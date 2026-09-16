@@ -346,8 +346,12 @@ class FallbackAI:
         # Luna is only reached after the free providers fail. Give structured output
         # enough room to close the JSON object, and retry once if the first response
         # is explicitly length-limited or arrives as truncated JSON.
-        initial_limit = max(max_tokens, 6000)
-        retry_limit = max(initial_limit * 2, 12000)
+        if mode == "profile":
+            initial_limit = min(max_tokens, 1800)
+            retry_limit = 2400
+        else:
+            initial_limit = max(max_tokens, 6000)
+            retry_limit = max(initial_limit * 2, 12000)
         token_limits = (initial_limit, retry_limit)
 
         for attempt, token_limit in enumerate(token_limits, start=1):

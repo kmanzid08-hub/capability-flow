@@ -639,7 +639,7 @@ class ProfileAIService:
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     schema=AIProfileExtraction.model_json_schema(),
-                    max_tokens=3000,
+                    max_tokens=1800,
                     mode="profile",
                 )
                 parsed = AIProfileExtraction.model_validate(data)
@@ -847,9 +847,15 @@ class ProfileAIService:
         )
 
     @staticmethod
-    def _chunk_fallback_text(text: str, max_chars: int = 12_000) -> list[str]:
+    def _estimate_tokens(text: str) -> int:
+        return max(1, (len(text) + 3) // 4)
+
+    @classmethod
+    def _chunk_fallback_text(cls, text: str, max_chars: int = 12_000) -> list[str]:
         text = text.strip()
-        if len(text) <= max_chars:
+        if not text:
+            return []
+        if cls._estimate_tokens(text) <= 4_000 and len(text) <= max_chars:
             return [text]
         chunks: list[str] = []
         start = 0
