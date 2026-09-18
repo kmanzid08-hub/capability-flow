@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -347,6 +347,29 @@ class ProfileAIService:
         self.storage = create_document_storage(self.settings)
         self.fallback_ai = FallbackAI(self.settings)
 
+    _PROCESSING_TIMEOUT = timedelta(minutes=30)
+
+    @classmethod
+    def _processing_reference(cls, document: PersonDocument) -> datetime | None:
+        value = getattr(document, "last_analyzed_at", None)
+        if value is None:
+            value = getattr(document, "created_at", None)
+        if value is None:
+            return None
+        typed_value = cast(datetime, value)
+        if typed_value.tzinfo is None:
+            return typed_value.replace(tzinfo=UTC)
+        return typed_value
+
+    @classmethod
+    def _is_stale_processing(cls, document: PersonDocument) -> bool:
+        if document.analysis_status != DocumentAnalysisStatus.PROCESSING.value:
+            return False
+        reference = cls._processing_reference(document)
+        if reference is None:
+            return True
+        return datetime.now(UTC) - reference > cls._PROCESSING_TIMEOUT
+
     async def analyze_document(self, person_id: uuid.UUID, document_id: uuid.UUID) -> int:
         person = await self.people.get(person_id)
         document = await self.documents.get(person_id, document_id)
@@ -366,8 +389,27 @@ class ProfileAIService:
                 ),
             )
 
-        previous_analysis_status = document.analysis_status
-        previous_analysis_error = document.analysis_error
+        if document.analysis_status == DocumentAnalysisStatus.PROCESSING.value:
+            if self._is_stale_processing(document):
+                await self._mark_analysis_failed(
+                    document_id,
+                    "The previous analysis was stale and has been stopped. Start Analyze again.",
+                )
+                document = await self.documents.get(person_id, document_id)
+                if document is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Person or document not found",
+                    )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "This document is already being analyzed. Please wait or abort "
+                        "the active analysis."
+                    ),
+                )
+
         document.analysis_status = DocumentAnalysisStatus.PROCESSING.value
         document.analysis_error = None
         await self.session.commit()
@@ -383,7 +425,10 @@ class ProfileAIService:
             direct_media_limit = self.settings.ai_large_pdf_direct_max_mb * 1024 * 1024
 
             if extension == ".pdf" and document.file_size > direct_media_limit:
-                result = await self._analyze_large_pdf(person, document)
+                result = await asyncio.wait_for(
+                    self._analyze_large_pdf(person, document),
+                    timeout=20 * 60,
+                )
             else:
                 content = await self.storage.read(document.storage_key)
                 if not content:
@@ -412,11 +457,14 @@ class ProfileAIService:
                         else:
                             raise
 
-                result = await self._call_ai(
-                    person=person,
-                    document=document,
-                    content=content,
-                    text=text,
+                result = await asyncio.wait_for(
+                    self._call_ai(
+                        person=person,
+                        document=document,
+                        content=content,
+                        text=text,
+                    ),
+                    timeout=20 * 60,
                 )
             suggestions = self._build_suggestions(person_id, document_id, result)
             if not suggestions:
@@ -446,6 +494,23 @@ class ProfileAIService:
             await self.session.commit()
             return len(suggestions)
 
+        except TimeoutError as exc:
+            await self.session.rollback()
+            message = (
+                "Document analysis timed out after 20 minutes. Your document is safe. "
+                "Please retry the analysis."
+            )
+            await self._mark_analysis_failed(document_id, message)
+            logger.error(
+                "AI document analysis timed out: person_id=%s document_id=%s",
+                person_id,
+                document_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=message,
+            ) from exc
+
         except asyncio.CancelledError:
             await self.session.rollback()
             try:
@@ -454,8 +519,12 @@ class ProfileAIService:
                     current_document is not None
                     and current_document.organization_id == self.organization_id
                 ):
-                    current_document.analysis_status = previous_analysis_status
-                    current_document.analysis_error = previous_analysis_error
+                    current_document.analysis_status = DocumentAnalysisStatus.FAILED.value
+                    current_document.analysis_error = (
+                        "Analysis was aborted. The document is safe. "
+                        "Start Analyze again when ready."
+                    )
+                    current_document.last_analyzed_at = datetime.now(UTC)
                     await self.session.commit()
             except Exception:
                 await self.session.rollback()

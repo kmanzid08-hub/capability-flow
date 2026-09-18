@@ -1,6 +1,9 @@
+import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from fastapi import (
     HTTPException,
@@ -35,6 +38,9 @@ from app.services.document_text import UnsupportedAnalysisDocument, extract_text
 class DocumentDownload:
     document: PersonDocument
     content: bytes
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentService:
@@ -85,13 +91,63 @@ class DocumentService:
                 detail="Person not found",
             )
 
+    _PROCESSING_TIMEOUT = timedelta(minutes=30)
+
+    @classmethod
+    def _processing_reference(cls, document: PersonDocument) -> datetime | None:
+        value = getattr(document, "updated_at", None)
+        if value is None:
+            value = getattr(document, "last_analyzed_at", None)
+        if value is None:
+            value = getattr(document, "created_at", None)
+        if value is None:
+            return None
+        typed_value = cast(datetime, value)
+        if typed_value.tzinfo is None:
+            return typed_value.replace(tzinfo=UTC)
+        return typed_value
+
+    @classmethod
+    def _is_stale_processing(cls, document: PersonDocument) -> bool:
+        if document.analysis_status != "processing":
+            return False
+        reference = cls._processing_reference(document)
+        if reference is None:
+            return True
+        return datetime.now(UTC) - reference > cls._PROCESSING_TIMEOUT
+
+    async def _recover_stale_processing(
+        self,
+        documents: list[PersonDocument],
+    ) -> None:
+        changed = False
+        for document in documents:
+            if not self._is_stale_processing(document):
+                continue
+            document.analysis_status = "failed"
+            document.analysis_error = (
+                "Document analysis was stopped because it remained in Processing "
+                "for more than 30 minutes. The document is safe. Start Analyze again."
+            )
+            document.last_analyzed_at = datetime.now(UTC)
+            changed = True
+            logger.warning(
+                "Recovered stale document analysis: person_id=%s document_id=%s",
+                document.person_id,
+                document.id,
+            )
+        if changed:
+            await self.session.commit()
+
     async def list_documents(
         self,
         person_id: uuid.UUID,
     ) -> list[PersonDocument]:
         await self.ensure_person(person_id)
 
-        return await self.documents.list(person_id)
+        documents = await self.documents.list(person_id)
+        await self._recover_stale_processing(documents)
+        return documents
 
     async def upload_document(
         self,
@@ -312,3 +368,4 @@ class DocumentService:
         await self.session.commit()
 
         await self.storage.delete(storage_key)
+
