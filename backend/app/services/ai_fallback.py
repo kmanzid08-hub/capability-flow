@@ -80,51 +80,6 @@ class FallbackAI:
         )
         errors: list[str] = []
 
-        if self.settings.openrouter_api_key:
-            try:
-                model = self.settings.openrouter_model.strip() or "openrouter/free"
-                client = AsyncOpenAI(
-                    api_key=self.settings.openrouter_api_key,
-                    base_url="https://openrouter.ai/api/v1",
-                    timeout=180.0,
-                    max_retries=1,
-                    default_headers={
-                        "HTTP-Referer": "https://capability-flow.onrender.com",
-                        "X-Title": "Capability Flow",
-                    },
-                )
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": data_url},
-                                },
-                            ],
-                        }
-                    ],
-                    temperature=0.0,
-                    max_tokens=3000,
-                )
-                text = self._decode_text_response(response)
-                logger.info(
-                    "Image text recovery succeeded: provider=openrouter model=%s label=%s",
-                    model,
-                    label,
-                )
-                return text, f"openrouter:{model}:vision"
-            except Exception as exc:
-                logger.warning(
-                    "OpenRouter image text recovery failed: label=%s error=%s",
-                    label,
-                    str(exc),
-                )
-                errors.append(f"openrouter: {type(exc).__name__}")
-
         if self.settings.groq_api_key:
             try:
                 client = AsyncOpenAI(
@@ -186,6 +141,52 @@ class FallbackAI:
                 )
                 errors.append(f"groq: {exc_type}")
 
+        if self.settings.openrouter_api_key:
+            try:
+                model = self.settings.openrouter_model.strip() or "openrouter/free"
+                client = AsyncOpenAI(
+                    api_key=self.settings.openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    timeout=180.0,
+                    max_retries=1,
+                    default_headers={
+                        "HTTP-Referer": "https://capability-flow.onrender.com",
+                        "X-Title": "Capability Flow",
+                    },
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": data_url},
+                                },
+                            ],
+                        }
+                    ],
+                    temperature=0.0,
+                    max_tokens=3000,
+                )
+                text = self._decode_text_response(response)
+                logger.info(
+                    "Image text recovery succeeded: provider=openrouter model=%s label=%s",
+                    model,
+                    label,
+                )
+                return text, f"openrouter:{model}:vision"
+            except Exception as exc:
+                exc_type = type(exc).__name__
+                logger.warning(
+                    "OpenRouter image text recovery failed: label=%s error=%s",
+                    label,
+                    str(exc),
+                )
+                errors.append(f"openrouter: {exc_type}")
+
         if self.settings.openai_api_key:
             try:
                 return await self._extract_image_text_openai(
@@ -195,12 +196,13 @@ class FallbackAI:
                     prompt=prompt,
                 )
             except Exception as exc:
+                exc_type = type(exc).__name__
                 logger.warning(
                     "OpenAI image text recovery failed: label=%s error=%s",
                     label,
                     str(exc),
                 )
-                errors.append(f"openai: {type(exc).__name__}")
+                errors.append(f"openai: {exc_type}")
 
         if not errors:
             raise AllAIProvidersUnavailable("No multimodal fallback provider is configured")
@@ -265,13 +267,10 @@ class FallbackAI:
         free_max_tokens = min(max_tokens, 3500)
         errors: list[str] = []
 
-        # Large opportunity analysis should not start with Groq because of strict
-        # context limits. Use the stronger providers first.
-        providers = (
-            ["openai", "openrouter", "groq"]
-            if mode == "opportunity"
-            else ["groq", "openrouter", "openai"]
-        )
+        # Keep the configured fallback order consistent for every text request.
+        # Gemini is the primary provider outside this class; once Gemini is unavailable,
+        # use the free providers first and reserve OpenAI Luna as the final safety net.
+        providers = ["groq", "openrouter", "openai"]
 
         for provider in providers:
             if provider == "groq" and self.settings.groq_api_key:
@@ -283,41 +282,45 @@ class FallbackAI:
                         max_tokens=free_max_tokens,
                     )
                 except Exception as exc:
+                    exc_type = type(exc).__name__
                     logger.warning(
                         "AI fallback provider exhausted: provider=groq error=%s",
                         str(exc),
                     )
-                    errors.append(f"groq: {type(exc).__name__}")
+                    errors.append(f"groq: {exc_type}")
 
-        if self.settings.openrouter_api_key:
-            try:
-                return await self._generate_openrouter(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    max_tokens=free_max_tokens,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "AI fallback provider exhausted: provider=openrouter error=%s",
-                    str(exc),
-                )
-                errors.append(f"openrouter: {type(exc).__name__}")
+            elif provider == "openrouter" and self.settings.openrouter_api_key:
+                try:
+                    return await self._generate_openrouter(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema=schema,
+                        max_tokens=free_max_tokens,
+                    )
+                except Exception as exc:
+                    exc_type = type(exc).__name__
+                    logger.warning(
+                        "AI fallback provider exhausted: provider=openrouter error=%s",
+                        str(exc),
+                    )
+                    errors.append(f"openrouter: {exc_type}")
 
-        if self.settings.openai_api_key:
-            try:
-                return await self._generate_openai(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    max_tokens=max_tokens,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "AI fallback provider exhausted: provider=openai error=%s",
-                    str(exc),
-                )
-                errors.append(f"openai: {type(exc).__name__}")
+            elif provider == "openai" and self.settings.openai_api_key:
+                try:
+                    return await self._generate_openai(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema=schema,
+                        max_tokens=max_tokens,
+                        mode=mode,
+                    )
+                except Exception as exc:
+                    exc_type = type(exc).__name__
+                    logger.warning(
+                        "AI fallback provider exhausted: provider=openai error=%s",
+                        str(exc),
+                    )
+                    errors.append(f"openai: {exc_type}")
 
         if not errors:
             raise AllAIProvidersUnavailable("No fallback AI provider is configured")
