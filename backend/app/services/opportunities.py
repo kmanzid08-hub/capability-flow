@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import BinaryIO
 
@@ -554,6 +554,47 @@ class OpportunityService:
         await self.session.refresh(source)
         return source
 
+    async def _recover_stale_analysis(
+        self,
+        opportunity_id: uuid.UUID,
+        *,
+        max_age: timedelta = timedelta(minutes=30),
+    ) -> None:
+        """Recover an analysis left active after a worker/process restart."""
+        item = await self.repo.latest_analysis(opportunity_id)
+        if item is None:
+            return
+
+        active_statuses = {
+            AnalysisStatus.ANALYZING,
+            AnalysisStatus.MATCHING,
+            AnalysisStatus.BUILDING_TEAM,
+        }
+        if item.status not in active_statuses or item.started_at is None:
+            return
+
+        started_at = item.started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+
+        if datetime.now(UTC) - started_at <= max_age:
+            return
+
+        item.status = AnalysisStatus.FAILED
+        item.error_message = (
+            "Analysis stopped because it remained active for more than "
+            f"{int(max_age.total_seconds() // 60)} minutes. "
+            "This usually happens when the analysis worker is restarted or "
+            "an AI provider does not return. Start the analysis again."
+        )
+        item.completed_at = datetime.now(UTC)
+
+        opportunity = await self.get(opportunity_id)
+        if opportunity.status == OpportunityStatus.ANALYZING:
+            opportunity.status = OpportunityStatus.NEEDS_REVIEW
+
+        await self.session.commit()
+
     async def analyze(self, opportunity_id: uuid.UUID) -> OpportunityAnalysis:
         opportunity = await self.get(opportunity_id)
         workflow_status = opportunity.status
@@ -954,6 +995,7 @@ class OpportunityService:
 
     async def analysis(self, opportunity_id: uuid.UUID) -> OpportunityAnalysis:
         await self.get(opportunity_id)
+        await self._recover_stale_analysis(opportunity_id)
         item = await self.repo.latest_analysis(opportunity_id)
         if item is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No analysis found")
