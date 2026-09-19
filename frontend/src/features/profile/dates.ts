@@ -30,16 +30,19 @@ export function formatPartialEvidenceDate(value: string): string {
 }
 
 export function formatExperiencePeriod(
-  startDate: string,
+  startDate: string | null,
   endDate: string | null,
   isCurrent: boolean,
 ): string {
-  const start = formatPartialEvidenceDate(startDate);
+  const start = startDate ? formatPartialEvidenceDate(startDate) : null;
   const end = isCurrent
     ? "Present"
     : endDate
       ? formatPartialEvidenceDate(endDate)
-      : "Not recorded";
+      : null;
 
+  if (!start && !end) return "Dates not recorded";
+  if (!start) return `Start date not recorded – ${end}`;
+  if (!end) return `${start} – End date not recorded`;
   return `${start} – ${end}`;
 }

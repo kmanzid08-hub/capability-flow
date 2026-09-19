@@ -31,7 +31,7 @@ def test_compact_evidence_maps_to_local_profile_shape() -> None:
     assert result.certifications[0].issue_date == "2020-04"
 
 
-def test_compact_undated_experience_is_not_mapped_to_unsavable_records() -> None:
+def test_compact_undated_project_is_preserved_without_inventing_a_date() -> None:
     compact = AICompactEvidenceChunk(
         evidence=[
             AICompactEvidence(
@@ -39,6 +39,7 @@ def test_compact_undated_experience_is_not_mapped_to_unsavable_records() -> None
                 title="Financial literacy training materials",
                 organization="Rwanda Environment Management Authority",
                 role="Trainer",
+                is_current=True,
                 confidence=0.97,
             ),
             AICompactEvidence(
@@ -62,6 +63,10 @@ def test_compact_undated_experience_is_not_mapped_to_unsavable_records() -> None
     result = ProfileAIService._compact_evidence_to_extraction(compact)
 
     assert result.employment == []
-    assert len(result.projects) == 1
-    assert result.projects[0].project_name == "Dated project"
-    assert result.projects[0].start_date == "2024"
+    assert len(result.projects) == 2
+    assert result.projects[0].project_name == "Financial literacy training materials"
+    assert result.projects[0].start_date is None
+    assert result.projects[0].is_current is True
+    assert result.projects[1].project_name == "Dated project"
+    assert result.projects[1].start_date == "2024"
+    assert result.projects[1].is_current is False

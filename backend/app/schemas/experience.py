@@ -122,7 +122,7 @@ class ProjectCreate(BaseModel):
     sector: str | None = Field(default=None, max_length=150)
     location: str | None = Field(default=None, max_length=250)
     country: str | None = Field(default=None, max_length=100)
-    start_date: str
+    start_date: str | None = None
     end_date: str | None = None
     is_current: bool = False
     description: str | None = None
@@ -132,8 +132,8 @@ class ProjectCreate(BaseModel):
 
     @field_validator("start_date", mode="before")
     @classmethod
-    def normalize_start_date(cls, value: object) -> str:
-        return _normalize_required_date(value)
+    def normalize_start_date(cls, value: object) -> str | None:
+        return _normalize_optional_date(value)
 
     @field_validator("end_date", mode="before")
     @classmethod
@@ -144,7 +144,8 @@ class ProjectCreate(BaseModel):
     def validate_dates(self) -> "ProjectCreate":
         if self.is_current and self.end_date is not None:
             raise ValueError("Current project cannot have an end date")
-        validate_partial_date_range(self.start_date, self.end_date)
+        if self.start_date is not None:
+            validate_partial_date_range(self.start_date, self.end_date)
         return self
 
 
@@ -177,8 +178,6 @@ class ProjectUpdate(BaseModel):
     def validate_patch(self) -> "ProjectUpdate":
         if not self.model_fields_set:
             raise ValueError("At least one field must be supplied")
-        if "start_date" in self.model_fields_set and self.start_date is None:
-            raise ValueError("Start date cannot be blank")
         if self.is_current is True and self.end_date is not None:
             raise ValueError("Current project cannot have an end date")
         if self.start_date is not None and self.end_date is not None:
@@ -195,7 +194,7 @@ class ProjectResponse(AuditFields):
     sector: str | None
     location: str | None
     country: str | None
-    start_date: str
+    start_date: str | None
     end_date: str | None
     is_current: bool
     description: str | None

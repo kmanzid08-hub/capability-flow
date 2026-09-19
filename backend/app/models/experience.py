@@ -176,9 +176,9 @@ class ProjectExperience(
         String(100),
     )
 
-    start_date: Mapped[str] = mapped_column(
+    start_date: Mapped[str | None] = mapped_column(
         String(10),
-        nullable=False,
+        nullable=True,
     )
 
     end_date: Mapped[str | None] = mapped_column(

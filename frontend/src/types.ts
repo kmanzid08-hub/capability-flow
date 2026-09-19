@@ -176,7 +176,7 @@ export type ProjectExperience = {
   sector: string | null;
   location: string | null;
   country: string | null;
-  start_date: string;
+  start_date: string | null;
   end_date: string | null;
   is_current: boolean;
   description: string | null;

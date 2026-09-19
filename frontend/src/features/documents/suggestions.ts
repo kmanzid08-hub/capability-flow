@@ -188,7 +188,7 @@ export function normalizeSuggestionPayload(
 export function suggestionValidationHint(suggestion: ProfileSuggestion): string | null {
   const payload = suggestion.payload;
 
-  if (suggestion.category === "employment" || suggestion.category === "project") {
+  if (suggestion.category === "employment") {
     const startDate = payload.start_date;
     if (startDate === null || startDate === undefined || startDate === "") {
       return "A start date is required. Year-only, year-month, and full dates are all accepted; keep the precision stated by the source.";

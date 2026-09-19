@@ -60,7 +60,7 @@ class ExperienceService:
     @staticmethod
     def validate_dates(
         *,
-        start_date: str,
+        start_date: str | None,
         end_date: str | None,
         is_current: bool,
         current_label: str,
@@ -71,13 +71,14 @@ class ExperienceService:
                 detail=(f"Current {current_label} cannot have an end date"),
             )
 
-        try:
-            validate_partial_date_range(start_date, end_date)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-            ) from exc
+        if start_date is not None:
+            try:
+                validate_partial_date_range(start_date, end_date)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(exc),
+                ) from exc
 
     async def list_employment(
         self,

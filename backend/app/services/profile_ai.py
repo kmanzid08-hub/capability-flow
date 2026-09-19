@@ -146,7 +146,7 @@ Return this JSON structure:
       "sector": string|null,
       "location": string|null,
       "country": string|null,
-      "start_date": string,
+      "start_date": string|null,
       "end_date": string|null,
       "is_current": boolean,
       "description": string|null,
@@ -162,9 +162,10 @@ Confidence must be between 0 and 1. Keep summaries concise and factual.
 Extract every reviewable fact that is explicitly supported by the document. A professional CV
 will usually contain several skills, education, employment, certifications, projects, or useful
 profile details. Do not return empty sections merely because some optional fields are missing.
-For employment and project records, keep a source-supported year-only or year-month start date;
-those are valid partial dates. Omit the structured record only when no start date at all is
-supported.
+For employment records, keep a source-supported year-only or year-month start date; those are
+valid partial dates, and omit employment only when no start date at all is supported. Project
+records may be extracted without a start date when the project itself is explicitly supported; use
+null for a missing project date and never invent one.
 Still extract all other supported evidence, such as skills, qualifications, clients, sectors,
 responsibilities, achievements, and useful profile details. For service attestations, employment
 certificates, reference letters, or similar evidence, preserve exactly the date precision stated by
@@ -234,7 +235,7 @@ class AIProject(BaseModel):
     sector: str | None = None
     location: str | None = None
     country: str | None = None
-    start_date: str
+    start_date: str | None = None
     end_date: str | None = None
     is_current: bool
     description: str | None = None
@@ -312,7 +313,7 @@ class AIChunkProject(BaseModel):
     sector: str | None = None
     location: str | None = None
     country: str | None = None
-    start_date: str
+    start_date: str | None = None
     end_date: str | None = None
     is_current: bool
     description: str | None = None
@@ -341,6 +342,7 @@ class AICompactEvidence(BaseModel):
     role: str | None = None
     start_date: str | None = None
     end_date: str | None = None
+    is_current: bool | None = None
     confidence: float = Field(ge=0, le=1)
 
 
@@ -806,8 +808,9 @@ class ProfileAIService:
                         "records. Each record must be short and directly supported by the "
                         "document. "
                         "Do not write a complete profile or repeat the same fact. "
-                        "For employment and project evidence, emit a record only when the "
-                        "source states a start date at least to the year. Never invent a date."
+                        "For employment evidence, emit a record only when the source states a "
+                        "start date at least to the year. Project evidence may omit dates when the "
+                        "project itself is explicitly supported. Never invent a date."
                     ),
                     user_prompt=(
                         f"{user_prompt}\n\n"
@@ -816,8 +819,11 @@ class ProfileAIService:
                         "education, certification, employment, project. For employment use "
                         "organization=employer and role=job title. For projects use "
                         "organization=client "
-                        "when stated and role=person's role. Preserve YYYY, YYYY-MM, or YYYY-MM-DD "
-                        "dates exactly; use null when the source does not state a date."
+                        "when stated and role=person's role. Set is_current=true only when the "
+                        "source explicitly says the work is current, present, or ongoing. "
+                        "Preserve YYYY, "
+                        "YYYY-MM, or YYYY-MM-DD dates exactly; use null when the source does not "
+                        "state a date."
                     ),
                     schema=AICompactEvidenceChunk.model_json_schema(),
                     max_tokens=900,
@@ -1113,8 +1119,6 @@ class ProfileAIService:
                     )
                 )
             elif category == "project":
-                if not item.start_date or not item.start_date.strip():
-                    continue
                 projects.append(
                     AIChunkProject(
                         project_name=item.title,
@@ -1122,7 +1126,7 @@ class ProfileAIService:
                         role=item.role or "Not specified",
                         start_date=item.start_date,
                         end_date=item.end_date,
-                        is_current=item.end_date is None,
+                        is_current=bool(item.is_current),
                         description=details,
                         confidence=item.confidence,
                     )
@@ -1424,10 +1428,10 @@ class ProfileAIService:
                 payload = dict(item)
                 if category in {"employment", "project"}:
                     payload = self._normalize_experience_payload(payload, category)
-                    if not payload.get("start_date"):
+                    if category == "employment" and not payload.get("start_date"):
                         logger.info(
-                            "Skipping undated AI %s suggestion: document_id=%s title=%s",
-                            category,
+                            "Skipping undated AI employment suggestion: "
+                            "document_id=%s title=%s",
                             document_id,
                             payload.get(title_key) or category.title(),
                         )

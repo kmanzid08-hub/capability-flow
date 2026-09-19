@@ -119,7 +119,7 @@ export function ProjectsPanel({
               location.trim() || null,
             country:
               country.trim() || null,
-            start_date: startDate,
+            start_date: startDate.trim() || null,
             end_date: isCurrent
               ? null
               : endDate || null,
@@ -353,8 +353,7 @@ export function ProjectsPanel({
               disabled={
                 create.isPending ||
                 !projectName.trim() ||
-                !role.trim() ||
-                !startDate
+                !role.trim()
               }
               onClick={() => create.mutate()}
             >

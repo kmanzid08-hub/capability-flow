@@ -716,16 +716,41 @@ class MatchingEngine:
             )
 
         if req.minimum_years:
+            dated_matches = [
+                (item, strength)
+                for item, strength in matches
+                if item.start_date is not None
+            ]
+            undated_matches = [
+                (item, strength)
+                for item, strength in matches
+                if item.start_date is None
+            ]
             years = (
                 sum(
-                    _safe_months_between_partial(
+                    months_between_partial(
                         item.start_date,
                         item.end_date or date.today().isoformat(),
                     )
-                    for item, _ in matches
+                    for item, _ in dated_matches
+                    if item.start_date is not None
                 )
                 / 12
             )
+            if years < req.minimum_years and undated_matches:
+                return RequirementEvaluation(
+                    MatchStatus.UNVERIFIED,
+                    0.5,
+                    [
+                        Evidence("project", item.project_name, item.sector)
+                        for item, _ in matches[:5]
+                    ],
+                    (
+                        f"Verified relevant project duration is {years:.1f} years, but "
+                        "some relevant projects have no recorded dates, so the required "
+                        f"{req.minimum_years:g} years cannot be verified."
+                    ),
+                )
             if years < req.minimum_years:
                 score = min(0.85, years / req.minimum_years)
                 return RequirementEvaluation(
@@ -736,7 +761,7 @@ class MatchingEngine:
                         for item, _ in matches[:5]
                     ],
                     (
-                        f"Relevant project duration is {years:.1f} years vs "
+                        f"Verified relevant project duration is {years:.1f} years vs "
                         + f"{req.minimum_years:g} required."
                     ),
                 )
