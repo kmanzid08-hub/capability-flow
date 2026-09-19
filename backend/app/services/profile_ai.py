@@ -805,7 +805,9 @@ class ProfileAIService:
                         "Extract compact, reviewable evidence only. Return at most 20 evidence "
                         "records. Each record must be short and directly supported by the "
                         "document. "
-                        "Do not write a complete profile or repeat the same fact."
+                        "Do not write a complete profile or repeat the same fact. "
+                        "For employment and project evidence, emit a record only when the "
+                        "source states a start date at least to the year. Never invent a date."
                     ),
                     user_prompt=(
                         f"{user_prompt}\n\n"
@@ -1097,11 +1099,13 @@ class ProfileAIService:
                     )
                 )
             elif category == "employment":
+                if not item.start_date or not item.start_date.strip():
+                    continue
                 employment.append(
                     AIChunkEmployment(
                         employer_name=item.organization or "Not specified",
                         job_title=item.role or item.title,
-                        start_date=item.start_date or "",
+                        start_date=item.start_date,
                         end_date=item.end_date,
                         is_current=item.end_date is None,
                         description=details,
@@ -1109,12 +1113,14 @@ class ProfileAIService:
                     )
                 )
             elif category == "project":
+                if not item.start_date or not item.start_date.strip():
+                    continue
                 projects.append(
                     AIChunkProject(
                         project_name=item.title,
                         client_name=item.organization,
                         role=item.role or "Not specified",
-                        start_date=item.start_date or "",
+                        start_date=item.start_date,
                         end_date=item.end_date,
                         is_current=item.end_date is None,
                         description=details,
@@ -1418,6 +1424,14 @@ class ProfileAIService:
                 payload = dict(item)
                 if category in {"employment", "project"}:
                     payload = self._normalize_experience_payload(payload, category)
+                    if not payload.get("start_date"):
+                        logger.info(
+                            "Skipping undated AI %s suggestion: document_id=%s title=%s",
+                            category,
+                            document_id,
+                            payload.get(title_key) or category.title(),
+                        )
+                        continue
                 elif category == "education":
                     payload = self._normalize_education_payload(payload)
                 elif category == "certification":
