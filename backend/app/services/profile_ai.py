@@ -331,6 +331,23 @@ class AIProfileChunkExtraction(BaseModel):
     projects: list[AIChunkProject]
 
 
+class AICompactEvidence(BaseModel):
+    """Small evidence record used by fallback providers to avoid large JSON output."""
+
+    category: str
+    title: str
+    details: str | None = Field(default=None, max_length=240)
+    organization: str | None = None
+    role: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+class AICompactEvidenceChunk(BaseModel):
+    evidence: list[AICompactEvidence] = Field(default_factory=list, max_length=20)
+
+
 class ProfileAIService:
     def __init__(
         self,
@@ -777,19 +794,35 @@ class ProfileAIService:
                     f"Document type: {document.document_type.value}. "
                     f"File: {document.original_filename}. "
                     f"Document chunk {index} of {len(chunks)}.\n\n"
-                    "Extract only evidence belonging to this person. Never treat tender requirements, "  # noqa: E501
-                    "other team members, or client staff as this person's experience. Extract every "  # noqa: E501  # noqa: E501
-                    "supported fact visible in this chunk; do not infer missing facts.\n\n"
+                    "Extract only evidence belonging to this person. Never treat tender "
+                    "requirements, other team members, or client staff as this person's "
+                    "experience. Extract every supported fact visible in this chunk; do not "
+                    "infer missing facts.\n\n"
                     f"DOCUMENT TEXT:\n{chunk}"
                 )
                 data, provider = await self.fallback_ai.generate_json(
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    schema=AIProfileChunkExtraction.model_json_schema(),
-                    max_tokens=1200,
+                    system_prompt=(
+                        "Extract compact, reviewable evidence only. Return at most 20 evidence "
+                        "records. Each record must be short and directly supported by the "
+                        "document. "
+                        "Do not write a complete profile or repeat the same fact."
+                    ),
+                    user_prompt=(
+                        f"{user_prompt}\n\n"
+                        "For each supported fact return category, title, and only the minimum "
+                        "details needed for later local normalization. Categories: profile, skill, "
+                        "education, certification, employment, project. For employment use "
+                        "organization=employer and role=job title. For projects use "
+                        "organization=client "
+                        "when stated and role=person's role. Preserve YYYY, YYYY-MM, or YYYY-MM-DD "
+                        "dates exactly; use null when the source does not state a date."
+                    ),
+                    schema=AICompactEvidenceChunk.model_json_schema(),
+                    max_tokens=900,
                     mode="profile",
                 )
-                parsed = AIProfileChunkExtraction.model_validate(data)
+                compact = AICompactEvidenceChunk.model_validate(data)
+                parsed = self._compact_evidence_to_extraction(compact)
                 results.append(parsed.model_dump(mode="json"))
                 providers.append(provider)
                 logger.info(
@@ -1018,6 +1051,85 @@ class ProfileAIService:
                 break
             start = max(start + 1, end - overlap)
         return [chunk for chunk in chunks if chunk]
+
+    @staticmethod
+    def _compact_evidence_to_extraction(
+        compact: AICompactEvidenceChunk,
+    ) -> AIProfileChunkExtraction:
+        """Convert tiny provider responses into the normal local profile shape."""
+        profile = AIChunkProfileDetails()
+        skills: list[AIChunkSkill] = []
+        education: list[AIChunkEducation] = []
+        certifications: list[AIChunkCertification] = []
+        employment: list[AIChunkEmployment] = []
+        projects: list[AIChunkProject] = []
+
+        for item in compact.evidence:
+            category = item.category.strip().lower()
+            details = item.details
+            if category == "profile":
+                text = details or item.title
+                if not profile.summary or len(text) > len(profile.summary):
+                    profile = profile.model_copy(update={"summary": text})
+            elif category == "skill":
+                skills.append(
+                    AIChunkSkill(name=item.title, confidence=item.confidence)
+                )
+            elif category == "education":
+                education.append(
+                    AIChunkEducation(
+                        degree_level="other",
+                        degree_name=item.title,
+                        institution=item.organization or item.title,
+                        start_date=item.start_date,
+                        graduation_date=item.end_date,
+                        confidence=item.confidence,
+                    )
+                )
+            elif category == "certification":
+                certifications.append(
+                    AIChunkCertification(
+                        name=item.title,
+                        issuer=item.organization,
+                        issue_date=item.start_date,
+                        expiry_date=item.end_date,
+                        confidence=item.confidence,
+                    )
+                )
+            elif category == "employment":
+                employment.append(
+                    AIChunkEmployment(
+                        employer_name=item.organization or "Not specified",
+                        job_title=item.role or item.title,
+                        start_date=item.start_date or "",
+                        end_date=item.end_date,
+                        is_current=item.end_date is None,
+                        description=details,
+                        confidence=item.confidence,
+                    )
+                )
+            elif category == "project":
+                projects.append(
+                    AIChunkProject(
+                        project_name=item.title,
+                        client_name=item.organization,
+                        role=item.role or "Not specified",
+                        start_date=item.start_date or "",
+                        end_date=item.end_date,
+                        is_current=item.end_date is None,
+                        description=details,
+                        confidence=item.confidence,
+                    )
+                )
+
+        return AIProfileChunkExtraction(
+            profile=profile,
+            skills=skills,
+            education=education,
+            certifications=certifications,
+            employment=employment,
+            projects=projects,
+        )
 
     @classmethod
     def _merge_extractions(cls, results: list[dict[str, Any]]) -> dict[str, Any]:

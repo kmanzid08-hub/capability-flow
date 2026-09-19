@@ -114,7 +114,7 @@ async def test_openai_retries_truncated_json_with_larger_output_budget(
 
 
 @pytest.mark.asyncio
-async def test_opportunity_fallbacks_try_free_providers_before_openai(
+async def test_opportunity_fallback_keeps_free_providers_before_openai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = Settings(
@@ -146,7 +146,7 @@ async def test_opportunity_fallbacks_try_free_providers_before_openai(
         system_prompt="system",
         user_prompt="user",
         schema={"type": "object"},
-        max_tokens=100,
+        max_tokens=900,
         mode="opportunity",
     )
 
