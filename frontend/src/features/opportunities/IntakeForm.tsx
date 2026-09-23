@@ -3,11 +3,12 @@ import { ArrowRight, FileText, Link2, LoaderCircle, Paperclip, Sparkles } from "
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button, Field, TextArea } from "../../components/ui";
-import { api, apiUpload, LARGE_UPLOAD_TIMEOUT_MS, OPPORTUNITY_ANALYSIS_TIMEOUT_MS } from "../../lib/api";
+import { api, apiUpload, LARGE_UPLOAD_TIMEOUT_MS } from "../../lib/api";
 import { qk } from "../../lib/queryKeys";
 import { useWorkspace } from "../../lib/workspace";
-import type { Opportunity, OpportunityAnalysis } from "../../types";
+import type { Opportunity } from "../../types";
 import type { OpportunityIntakeResponse } from "./shared";
+import { analyzeOpportunityWithRecovery } from "./analysisRecovery";
 
 export function IntakeForm({ compact = false, opportunityId, onComplete, onBusyChange }: {
   compact?: boolean; opportunityId?: string; onComplete?: (opportunity: Opportunity) => void; onBusyChange?: (busy: boolean) => void;
@@ -48,7 +49,7 @@ export function IntakeForm({ compact = false, opportunityId, onComplete, onBusyC
       }
       if (autoAnalyze) {
         setPhase("Analyzing requirements and matching your team");
-        await api<OpportunityAnalysis>(`/opportunities/${id}/analyze`, { method: "POST", timeoutMs: OPPORTUNITY_ANALYSIS_TIMEOUT_MS });
+        await analyzeOpportunityWithRecovery(id);
       }
       return api<Opportunity>(`/opportunities/${id}`);
     }, onSuccess: (opportunity) => { refresh(opportunity.id); onComplete?.(opportunity); if (!opportunityId) navigate(`/opportunities/${opportunity.id}`); }, onError: () => { if (saved.current) refresh(saved.current); }
