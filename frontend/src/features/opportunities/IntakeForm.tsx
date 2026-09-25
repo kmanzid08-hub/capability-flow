@@ -49,7 +49,7 @@ export function IntakeForm({ compact = false, opportunityId, onComplete, onBusyC
       }
       if (autoAnalyze) {
         setPhase("Analyzing requirements and matching your team");
-        await analyzeOpportunityWithRecovery(id);
+        await analyzeOpportunityWithRecovery(id, setPhase);
       }
       return api<Opportunity>(`/opportunities/${id}`);
     }, onSuccess: (opportunity) => { refresh(opportunity.id); onComplete?.(opportunity); if (!opportunityId) navigate(`/opportunities/${opportunity.id}`); }, onError: () => { if (saved.current) refresh(saved.current); }

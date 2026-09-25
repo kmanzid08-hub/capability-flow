@@ -625,14 +625,13 @@ class OpportunityService:
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "Add a readable source before analysis",
                 )
-        extractor = GeminiRequirementExtractor()
         version = await self.repo.next_analysis_version(opportunity_id)
         analysis = OpportunityAnalysis(
             organization_id=self.organization_id,
             opportunity_id=opportunity_id,
             version=version,
             status=AnalysisStatus.ANALYZING,
-            model_name=extractor.model_name,
+            model_name=None,
             started_at=datetime.now(UTC),
             source_snapshot=source_text,
             created_by_user_id=self.user_id,
@@ -643,6 +642,9 @@ class OpportunityService:
         await self.session.commit()
         await self.session.refresh(analysis)
         try:
+            extractor = GeminiRequirementExtractor()
+            analysis.model_name = extractor.model_name
+            await self.session.commit()
             extracted = await extractor.extract(source_text)
             await self._persist_extracted(opportunity, analysis, extracted)
 

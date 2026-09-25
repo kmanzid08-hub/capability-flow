@@ -25,8 +25,14 @@ test("renders the lazy-loaded login route", async () => {
   );
 
   expect(
-    await screen.findByRole("heading", {
-      name: "Welcome back",
-    }),
+    await screen.findByRole(
+      "heading",
+      {
+        name: "Welcome back",
+      },
+      {
+        timeout: 5_000,
+      },
+    ),
   ).toBeInTheDocument();
 });

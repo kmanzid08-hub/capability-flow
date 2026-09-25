@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
@@ -11,7 +12,7 @@ from app.models.opportunity import (
     OpportunityAnalysis,
     OpportunitySource,
 )
-from app.models.opportunity_enums import OpportunitySourceType
+from app.models.opportunity_enums import AnalysisStatus, OpportunitySourceType, OpportunityStatus
 from app.models.person import Person
 from app.schemas.opportunity import (
     AnalysisResponse,
@@ -33,6 +34,10 @@ from app.schemas.opportunity import (
     UrlIntakeCreate,
 )
 from app.services.opportunities import OpportunityService
+from app.services.opportunity_analysis_jobs import (
+    opportunity_analysis_job_running,
+    schedule_opportunity_analysis_job,
+)
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
 WRITE_ROLES = {
@@ -332,6 +337,112 @@ async def delete_source(
 ) -> None:
     require_write_access(membership)
     await service(session, membership, user).delete_source(opportunity_id, source_id)
+
+
+@router.post(
+    "/{opportunity_id}/analyze/start",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_opportunity_analysis(
+    opportunity_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+    resume_version: int | None = None,
+) -> dict[str, object]:
+    """Start analysis without keeping the browser request open for the AI work."""
+    require_write_access(membership)
+    svc = service(session, membership, user)
+    opportunity = await svc.get(opportunity_id)
+    sources = await svc.sources(opportunity_id)
+    has_readable_source = any((source.raw_text or "").strip() for source in sources) or bool(
+        (opportunity.description or "").strip()
+    )
+    if not has_readable_source:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Add a readable source before analysis",
+        )
+
+    latest = await svc.repo.latest_analysis(opportunity_id)
+    now = datetime.now(UTC)
+    active_statuses = {
+        AnalysisStatus.QUEUED,
+        AnalysisStatus.FETCHING,
+        AnalysisStatus.EXTRACTING,
+        AnalysisStatus.ANALYZING,
+        AnalysisStatus.MATCHING,
+        AnalysisStatus.BUILDING_TEAM,
+    }
+
+    if (
+        resume_version is not None
+        and latest is not None
+        and latest.version >= resume_version
+        and latest.status not in active_statuses
+    ):
+        return {
+            "status": latest.status.value,
+            "opportunity_id": str(opportunity_id),
+            "target_version": latest.version,
+        }
+
+    if opportunity_analysis_job_running(opportunity_id):
+        target_version = (
+            latest.version
+            if latest is not None and latest.status in active_statuses
+            else (latest.version if latest is not None else 0) + 1
+        )
+        return {
+            "status": "running",
+            "opportunity_id": str(opportunity_id),
+            "target_version": target_version,
+        }
+
+    if latest is not None and latest.status in active_statuses:
+        touched_at = latest.updated_at or latest.started_at or latest.created_at
+        if touched_at is not None and touched_at.tzinfo is None:
+            touched_at = touched_at.replace(tzinfo=UTC)
+
+        # Give a just-started legacy synchronous request a short grace period.
+        # New background jobs are tracked in-process, so after a server restart
+        # the frontend can safely reassert /analyze/start and recover quickly.
+        if touched_at is not None and now - touched_at < timedelta(minutes=1):
+            return {
+                "status": "running",
+                "opportunity_id": str(opportunity_id),
+                "target_version": latest.version,
+            }
+
+        latest.status = AnalysisStatus.FAILED
+        latest.error_message = (
+            "Previous analysis was interrupted by a server restart or lost worker. "
+            "A new analysis has been started."
+        )
+        latest.completed_at = now
+        if opportunity.status == OpportunityStatus.ANALYZING:
+            opportunity.status = OpportunityStatus.NEEDS_REVIEW
+        await session.commit()
+
+    previous_version = latest.version if latest is not None else 0
+    target_version = previous_version + 1
+
+    if not schedule_opportunity_analysis_job(
+        opportunity_id,
+        membership.organization_id,
+        user.id,
+    ):
+        return {
+            "status": "running",
+            "opportunity_id": str(opportunity_id),
+            "target_version": target_version,
+        }
+
+    return {
+        "status": "queued",
+        "opportunity_id": str(opportunity_id),
+        "target_version": target_version,
+    }
 
 
 @router.post("/{opportunity_id}/analyze", response_model=AnalysisResponse)

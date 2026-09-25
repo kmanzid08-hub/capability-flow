@@ -27,10 +27,7 @@ import {
   Field,
   TextArea
 } from "../components/ui";
-import {
-  OPPORTUNITY_ANALYSIS_TIMEOUT_MS,
-  api
-} from "../lib/api";
+import { api } from "../lib/api";
 import type {
   Opportunity,
   OpportunityAnalysis,
@@ -45,6 +42,7 @@ import { formatDate, percent } from "../features/opportunities/shared";
 import { qk } from "../lib/queryKeys";
 import { useWorkspace } from "../lib/workspace";
 
+import { analyzeOpportunityWithRecovery } from "../features/opportunities/analysisRecovery";
 import { GapsPanel } from "../features/opportunities/GapsPanel";
 import { IntakeForm } from "../features/opportunities/IntakeForm";
 import { RecommendedTeams } from "../features/opportunities/RecommendedTeams";
@@ -202,14 +200,12 @@ export function OpportunityPage() {
 
   const reanalyze =
     useMutation({
-      mutationFn: () =>
-        api<OpportunityAnalysis>(
-          `/opportunities/${opportunityId}/analyze`,
-          {
-            method: "POST",
-            timeoutMs: OPPORTUNITY_ANALYSIS_TIMEOUT_MS,
-          },
-        ),
+      mutationFn: async () => {
+        if (!opportunityId) {
+          throw new Error("Opportunity is unavailable.");
+        }
+        return analyzeOpportunityWithRecovery(opportunityId);
+      },
 
       onSettled: () => {
         queryClient.invalidateQueries({

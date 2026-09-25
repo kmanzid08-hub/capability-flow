@@ -6,15 +6,25 @@ export const AUTH_TIMEOUT_MS = 60000;
 export const LARGE_UPLOAD_TIMEOUT_MS = 1800000;
 export const AI_ANALYSIS_TIMEOUT_MS = 1800000;
 export const OPPORTUNITY_ANALYSIS_TIMEOUT_MS = 1800000;
-export type ApiRequestInit = RequestInit & { timeoutMs?: number; };
+export type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+  authToken?: string | null;
+  organizationId?: string | null;
+};
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); this.name = "ApiError"; }
 }
-function requestHeaders(init: RequestInit): Headers {
+function requestHeaders(init: ApiRequestInit): Headers {
   const headers = new Headers(init.headers);
-  if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  const token = session.token();
-  const organization = session.organization();
+  if (init.body && !(init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
+  const token =
+    init.authToken === undefined ? session.token() : init.authToken;
+  const organization =
+    init.organizationId === undefined
+      ? session.organization()
+      : init.organizationId;
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (organization) headers.set("X-Organization-ID", organization);
   return headers;
@@ -45,8 +55,15 @@ async function request<T>(path: string, init: ApiRequestInit, read: (response: R
   if (externalSignal?.aborted) controller.abort();
   else externalSignal?.addEventListener("abort", cancel, { once: true });
   const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutForPath(path, init));
-  const { timeoutMs: _timeoutMs, ...fetchInit } = init;
+  const {
+    timeoutMs: _timeoutMs,
+    authToken: _authToken,
+    organizationId: _organizationId,
+    ...fetchInit
+  } = init;
   void _timeoutMs;
+  void _authToken;
+  void _organizationId;
   try {
     const response = await fetch(`${API_URL}${path}`, { ...fetchInit, headers: requestHeaders(init), signal: controller.signal });
     ensureSameWorkspace(snapshot);

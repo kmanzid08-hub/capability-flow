@@ -20,13 +20,20 @@ export function LoginPage() {
   const login = useMutation({
     mutationFn: async (values: z.infer<typeof loginSchema>) => {
       setSubmitError(null);
-      const data = await api<{ access_token: string; }>("/auth/login", { method: "POST", body: JSON.stringify(values) });
-      session.setToken(data.access_token);
-      const me = await api<CurrentUser>("/auth/me");
+      const data = await api<{ access_token: string; }>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify(values),
+        authToken: null,
+        organizationId: null,
+      });
+      const me = await api<CurrentUser>("/auth/me", {
+        authToken: data.access_token,
+        organizationId: null,
+      });
       const membership = me.memberships.find((item) => item.organization_id === session.organization()) ?? me.memberships[0];
       if (!membership) throw new Error("Your account does not have an active workspace membership.");
       return { token: data.access_token, organization: membership.organization_id };
-    }, onSuccess: (data) => { queryClient.clear(); session.set(data.token, data.organization); navigate("/", { replace: true }); }, onError: (error) => { session.clear(); setSubmitError(error.message); }
+    }, onSuccess: (data) => { queryClient.clear(); session.set(data.token, data.organization); navigate("/", { replace: true }); }, onError: (error) => { setSubmitError(error.message); }
   });
   return <main className="cf-auth"><div className="cf-auth-inner"><Brand /><h1>Welcome back</h1><p className="cf-auth-subtitle">Your people. Your expertise. In one place.</p>
     <form noValidate className="space-y-5" onSubmit={handleSubmit((values) => login.mutate(values), () => setSubmitError("Please correct the highlighted fields."))}>
