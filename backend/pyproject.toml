@@ -10,6 +10,7 @@ dependencies = [
   "boto3>=1.40,<2",
   "email-validator>=2.2,<3",
   "fastapi>=0.115,<1",
+  "greenlet>=3.1,<4",
   "httpx>=0.28,<1",
   "legacy-doc>=0.1,<1",
   "openai>=2.48,<3",
