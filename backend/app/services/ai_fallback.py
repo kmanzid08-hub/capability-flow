@@ -44,6 +44,11 @@ class FallbackAI:
 
     @staticmethod
     def _is_hard_rate_limit(exc: Exception) -> bool:
+        # A model stopping because its response hit max_tokens is recoverable:
+        # another model or a larger output budget may still succeed.
+        if isinstance(exc, AIOutputTruncated):
+            return False
+
         status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
         message = str(exc).lower()
         return status_code in (413, 429) or any(
@@ -58,7 +63,6 @@ class FallbackAI:
                 "request too large",
                 "context length",
                 "maximum context",
-                "token limit",
             )
         )
 
@@ -260,15 +264,14 @@ class FallbackAI:
         max_tokens: int,
         mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
-        # Keep the free providers tightly bounded. OpenAI Luna is the paid safety net
-        # and receives a larger ceiling only after the free providers are exhausted.
+        # Opportunity extraction can produce much larger JSON than profile/quick
+        # requests. Keep Groq below its strict TPM ceiling and give OpenRouter more
+        # room before falling through to the paid OpenAI safety net.
         free_max_tokens = min(max_tokens, 3500)
+        groq_max_tokens = min(max_tokens, 2200) if mode == "opportunity" else free_max_tokens
+        openrouter_max_tokens = min(max_tokens, 4500) if mode == "opportunity" else free_max_tokens
         errors: list[str] = []
 
-        # Large opportunity analysis should not start with Groq because of strict
-        # context limits. Use the stronger providers first.
-        # Preserve the configured free-first policy for every structured request.
-        # OpenAI is the final safety net, including opportunity analysis.
         providers = ["groq", "openrouter", "openai"]
 
         for provider in providers:
@@ -278,7 +281,8 @@ class FallbackAI:
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
-                        max_tokens=free_max_tokens,
+                        max_tokens=groq_max_tokens,
+                        mode=mode,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -287,35 +291,37 @@ class FallbackAI:
                     )
                     errors.append(f"groq: {type(exc).__name__}")
 
-        if self.settings.openrouter_api_key:
-            try:
-                return await self._generate_openrouter(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    max_tokens=free_max_tokens,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "AI fallback provider exhausted: provider=openrouter error=%s",
-                    str(exc),
-                )
-                errors.append(f"openrouter: {type(exc).__name__}")
+            if provider == "openrouter" and self.settings.openrouter_api_key:
+                try:
+                    return await self._generate_openrouter(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema=schema,
+                        max_tokens=openrouter_max_tokens,
+                        mode=mode,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "AI fallback provider exhausted: provider=openrouter error=%s",
+                        str(exc),
+                    )
+                    errors.append(f"openrouter: {type(exc).__name__}")
 
-        if self.settings.openai_api_key:
-            try:
-                return await self._generate_openai(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    max_tokens=max_tokens,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "AI fallback provider exhausted: provider=openai error=%s",
-                    str(exc),
-                )
-                errors.append(f"openai: {type(exc).__name__}")
+            if provider == "openai" and self.settings.openai_api_key:
+                try:
+                    return await self._generate_openai(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema=schema,
+                        max_tokens=max_tokens,
+                        mode=mode,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "AI fallback provider exhausted: provider=openai error=%s",
+                        str(exc),
+                    )
+                    errors.append(f"openai: {type(exc).__name__}")
 
         if not errors:
             raise AllAIProvidersUnavailable("No fallback AI provider is configured")
@@ -456,6 +462,15 @@ class FallbackAI:
             except Exception as exc:
                 logger.warning("Groq model failed: model=%s error=%s", model, str(exc))
                 errors.append(f"{model}: {type(exc).__name__}")
+
+                status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+                if status_code in (413, "413"):
+                    logger.warning(
+                        "Groq model request exceeded that model's token allowance; "
+                        "trying the next Groq model"
+                    )
+                    continue
+
                 if self._is_hard_rate_limit(exc):
                     logger.warning(
                         "Groq hard quota/rate limit detected; switching to the next "
@@ -490,8 +505,8 @@ class FallbackAI:
             },
         )
 
-        # First request forces OpenRouter's free router to choose only a model that
-        # supports structured JSON Schema output.
+        structured_error: Exception | None = None
+
         try:
             data = await self._chat_json(
                 client=client,
@@ -507,28 +522,62 @@ class FallbackAI:
                 model,
             )
             return data, f"openrouter:{model}"
-        except Exception as structured_exc:
+        except Exception as exc:
+            structured_error = exc
             logger.warning(
                 "OpenRouter structured-output attempt failed: model=%s error=%s",
                 model,
-                str(structured_exc),
+                str(exc),
             )
-            if self._is_hard_rate_limit(structured_exc):
-                logger.warning(
-                    "OpenRouter hard quota/rate limit detected; switching to OpenAI Luna"
-                )
-                raise
 
-        # Some free models temporarily expose JSON mode without strict schema mode.
-        # A second request keeps the application useful while downstream Pydantic
-        # validation remains the final safety gate.
+        if isinstance(structured_error, AIOutputTruncated):
+            retry_tokens = min(8192, max(max_tokens * 2, 6000))
+            try:
+                data = await self._chat_json(
+                    client=client,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    max_tokens=retry_tokens,
+                    require_parameters=True,
+                )
+                logger.info(
+                    "AI fallback succeeded with provider=openrouter model=%s "
+                    "after output-budget retry max_tokens=%s",
+                    model,
+                    retry_tokens,
+                )
+                return data, f"openrouter:{model}"
+            except Exception as retry_exc:
+                structured_error = retry_exc
+                logger.warning(
+                    "OpenRouter larger structured-output retry failed: "
+                    "model=%s max_tokens=%s error=%s",
+                    model,
+                    retry_tokens,
+                    str(retry_exc),
+                )
+
+        if structured_error is not None and self._is_hard_rate_limit(structured_error):
+            logger.warning(
+                "OpenRouter quota/context limit detected; switching to the next configured provider"
+            )
+            raise structured_error
+
+        # Some free models expose JSON mode even when JSON Schema mode is unstable.
+        # Opportunity extraction gets a larger second-chance budget because the
+        # result can contain many roles and requirements.
+        json_object_tokens = (
+            min(8192, max(max_tokens, 6000)) if mode == "opportunity" else max_tokens
+        )
         data = await self._chat_json_object(
             client=client,
             model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema=schema,
-            max_tokens=max_tokens,
+            max_tokens=json_object_tokens,
         )
         logger.info(
             "AI fallback succeeded with provider=openrouter model=%s mode=json_object",

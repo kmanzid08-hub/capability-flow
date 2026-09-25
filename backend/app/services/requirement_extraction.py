@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Any
 
@@ -11,6 +12,8 @@ from app.core.opportunity_config import get_opportunity_intelligence_settings
 from app.core.partial_dates import normalize_partial_date
 from app.schemas.opportunity import ExtractedOpportunity
 from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_opportunity_dates(payload: dict[str, Any]) -> dict[str, Any]:
@@ -179,6 +182,13 @@ class GeminiRequirementExtractor:
                 return ExtractedOpportunity.model_validate(json.loads(payload))
             except Exception as exc:
                 gemini_error = exc
+                logger.warning(
+                    "Gemini opportunity extraction failed: model=%s chunk=%s/%s error=%s",
+                    self.app_settings.ai_model,
+                    chunk_index,
+                    chunk_count,
+                    str(exc),
+                )
 
         if self.fallback_ai.configured:
             try:
@@ -187,6 +197,7 @@ class GeminiRequirementExtractor:
                     user_prompt=user_prompt,
                     schema=schema,
                     max_tokens=8192,
+                    mode="opportunity",
                 )
                 return ExtractedOpportunity.model_validate(data)
             except (AllAIProvidersUnavailable, ValidationError, ValueError, TypeError) as exc:
