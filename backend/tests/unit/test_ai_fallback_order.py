@@ -153,3 +153,95 @@ async def test_opportunity_fallback_keeps_free_providers_before_openai(
     assert calls == ["groq", "openrouter", "openai"]
     assert data == {"ok": True}
     assert provider == "openai:gpt-5.6-luna"
+
+
+@pytest.mark.asyncio
+async def test_profile_empty_result_falls_through_to_next_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        groq_api_key="test-groq-key",
+        openrouter_api_key="test-openrouter-key",
+        openai_api_key="test-openai-key",
+    )
+    service = FallbackAI(settings)
+    calls: list[str] = []
+
+    async def empty_groq(**_: Any) -> tuple[dict[str, Any], str]:
+        calls.append("groq")
+        return {"evidence": []}, "groq:test"
+
+    async def useful_openrouter(**_: Any) -> tuple[dict[str, Any], str]:
+        calls.append("openrouter")
+        return {
+            "evidence": [
+                {
+                    "category": "employment",
+                    "title": "Supply Chain Manager",
+                }
+            ]
+        }, "openrouter:test"
+
+    async def unexpected_openai(**_: Any) -> tuple[dict[str, Any], str]:
+        calls.append("openai")
+        return {"evidence": []}, "openai:test"
+
+    monkeypatch.setattr(service, "_generate_groq", empty_groq)
+    monkeypatch.setattr(service, "_generate_openrouter", useful_openrouter)
+    monkeypatch.setattr(service, "_generate_openai", unexpected_openai)
+
+    data, provider = await service.generate_json(
+        system_prompt="system",
+        user_prompt="user",
+        schema={"type": "object"},
+        max_tokens=900,
+        mode="profile",
+    )
+
+    assert calls == ["groq", "openrouter"]
+    assert data["evidence"][0]["category"] == "employment"
+    assert provider == "openrouter:test"
+
+
+@pytest.mark.asyncio
+async def test_profile_cover_chunk_may_remain_empty_after_all_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        groq_api_key="test-groq-key",
+        openrouter_api_key="test-openrouter-key",
+        openai_api_key="test-openai-key",
+    )
+    service = FallbackAI(settings)
+    calls: list[str] = []
+
+    async def empty(provider: str, **_: Any) -> tuple[dict[str, Any], str]:
+        calls.append(provider)
+        return {"evidence": []}, f"{provider}:test"
+
+    async def empty_groq(**kwargs: Any) -> tuple[dict[str, Any], str]:
+        return await empty("groq", **kwargs)
+
+    async def empty_openrouter(**kwargs: Any) -> tuple[dict[str, Any], str]:
+        return await empty("openrouter", **kwargs)
+
+    async def empty_openai(**kwargs: Any) -> tuple[dict[str, Any], str]:
+        return await empty("openai", **kwargs)
+
+    monkeypatch.setattr(service, "_generate_groq", empty_groq)
+    monkeypatch.setattr(service, "_generate_openrouter", empty_openrouter)
+    monkeypatch.setattr(service, "_generate_openai", empty_openai)
+
+    data, provider = await service.generate_json(
+        system_prompt="system",
+        user_prompt="cover page only",
+        schema={"type": "object"},
+        max_tokens=900,
+        mode="profile",
+    )
+
+    assert calls == ["groq", "openrouter", "openai"]
+    assert data == {"evidence": []}
+    assert provider == "openai:test"

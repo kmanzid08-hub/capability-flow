@@ -255,6 +255,18 @@ class FallbackAI:
         )
         return text, f"openai:{model}:vision"
 
+    @staticmethod
+    def _profile_result_has_evidence(data: dict[str, Any]) -> bool:
+        evidence = data.get("evidence")
+        if not isinstance(evidence, list):
+            return False
+        return any(
+            isinstance(item, dict)
+            and str(item.get("category") or "").strip()
+            and str(item.get("title") or "").strip()
+            for item in evidence
+        )
+
     async def generate_json(
         self,
         *,
@@ -271,19 +283,28 @@ class FallbackAI:
         groq_max_tokens = min(max_tokens, 2200) if mode == "opportunity" else free_max_tokens
         openrouter_max_tokens = min(max_tokens, 4500) if mode == "opportunity" else free_max_tokens
         errors: list[str] = []
+        last_empty_profile_result: tuple[dict[str, Any], str] | None = None
 
         providers = ["groq", "openrouter", "openai"]
 
         for provider in providers:
             if provider == "groq" and self.settings.groq_api_key:
                 try:
-                    return await self._generate_groq(
+                    result = await self._generate_groq(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
                         max_tokens=groq_max_tokens,
                         mode=mode,
                     )
+                    if mode == "profile" and not self._profile_result_has_evidence(result[0]):
+                        last_empty_profile_result = result
+                        logger.warning(
+                            "AI profile fallback returned no evidence: provider=groq; "
+                            "trying the next provider"
+                        )
+                    else:
+                        return result
                 except Exception as exc:
                     logger.warning(
                         "AI fallback provider exhausted: provider=groq error=%s",
@@ -293,13 +314,21 @@ class FallbackAI:
 
             if provider == "openrouter" and self.settings.openrouter_api_key:
                 try:
-                    return await self._generate_openrouter(
+                    result = await self._generate_openrouter(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
                         max_tokens=openrouter_max_tokens,
                         mode=mode,
                     )
+                    if mode == "profile" and not self._profile_result_has_evidence(result[0]):
+                        last_empty_profile_result = result
+                        logger.warning(
+                            "AI profile fallback returned no evidence: provider=openrouter; "
+                            "trying the next provider"
+                        )
+                    else:
+                        return result
                 except Exception as exc:
                     logger.warning(
                         "AI fallback provider exhausted: provider=openrouter error=%s",
@@ -309,13 +338,18 @@ class FallbackAI:
 
             if provider == "openai" and self.settings.openai_api_key:
                 try:
-                    return await self._generate_openai(
+                    result = await self._generate_openai(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
                         max_tokens=max_tokens,
                         mode=mode,
                     )
+                    if mode == "profile" and not self._profile_result_has_evidence(result[0]):
+                        last_empty_profile_result = result
+                        logger.warning("AI profile fallback returned no evidence: provider=openai")
+                    else:
+                        return result
                 except Exception as exc:
                     logger.warning(
                         "AI fallback provider exhausted: provider=openai error=%s",
@@ -323,6 +357,11 @@ class FallbackAI:
                     )
                     errors.append(f"openai: {type(exc).__name__}")
 
+        # A chunk such as a cover page may genuinely contain no profile evidence.
+        # Returning the final valid empty result lets the caller merge other chunks,
+        # while still ensuring every configured provider got a chance to inspect it.
+        if last_empty_profile_result is not None:
+            return last_empty_profile_result
         if not errors:
             raise AllAIProvidersUnavailable("No fallback AI provider is configured")
         raise AllAIProvidersUnavailable("; ".join(errors))

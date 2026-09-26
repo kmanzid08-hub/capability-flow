@@ -693,30 +693,57 @@ class ProfileAIService:
                 )
 
             text = extract_pdf_text_path(path, self.settings.ai_max_document_chars)
-            if self._has_usable_fallback_text(text):
+            page_count, image_pages = self._pdf_metrics(content=b"", pdf_path=path)
+            if not self._pdf_text_needs_image_recovery(
+                text,
+                page_count=page_count,
+                image_pages=image_pages,
+            ):
                 logger.info(
-                    "Large PDF using text-first analysis: file=%s bytes=%s chars=%s",
+                    "Large PDF using text-first analysis: file=%s bytes=%s chars=%s "
+                    "pages=%s image_pages=%s",
                     document.original_filename,
                     document.file_size,
                     len(text),
+                    page_count,
+                    image_pages,
                 )
                 return await self._call_ai(
                     person=person,
                     document=document,
                     content=b"",
                     text=text,
+                    pdf_path=path,
                 )
 
-            logger.info(
-                "Large PDF has no searchable text; using page-image recovery: file=%s bytes=%s",
+            logger.warning(
+                "Large PDF text layer is too thin for complete profile analysis; "
+                "using page-image recovery: file=%s bytes=%s chars=%s pages=%s "
+                "image_pages=%s",
                 document.original_filename,
                 document.file_size,
+                len(text),
+                page_count,
+                image_pages,
             )
+            recovered_image_text = await self._recover_image_text(
+                document,
+                b"",
+                pdf_path=path,
+                require_complete=bool(page_count and image_pages >= page_count),
+            )
+            if not recovered_image_text:
+                raise DocumentTextRecoveryUnavailable(
+                    "This PDF appears to be scan-based, but its page images could not be read. "
+                    "The document is safe. Please retry when the multimodal AI providers are "
+                    "available."
+                )
+            combined_text = self._combine_text_layers(text, recovered_image_text)
             return await self._call_ai(
                 person=person,
                 document=document,
                 content=b"",
-                text=None,
+                text=combined_text,
                 pdf_path=path,
             )
 
@@ -837,7 +864,8 @@ class ProfileAIService:
             ) from gemini_error
 
         fallback_text = text
-        if fallback_text is None and document.file_extension.lower() == ".pdf":
+        extension = document.file_extension.lower()
+        if fallback_text is None and extension == ".pdf":
             try:
                 if pdf_path is not None:
                     fallback_text = extract_pdf_text_path(
@@ -852,7 +880,34 @@ class ProfileAIService:
             except Exception as exc:
                 logger.warning("PDF fallback text extraction failed: %s", str(exc))
                 fallback_text = None
-        if not self._has_usable_fallback_text(fallback_text):
+
+        if extension == ".pdf":
+            page_count, image_pages = self._pdf_metrics(content=content, pdf_path=pdf_path)
+            if self._pdf_text_needs_image_recovery(
+                fallback_text,
+                page_count=page_count,
+                image_pages=image_pages,
+            ):
+                logger.warning(
+                    "PDF fallback text is incomplete; recovering page images before profile "
+                    "extraction: file=%s chars=%s pages=%s image_pages=%s",
+                    document.original_filename,
+                    len(fallback_text or ""),
+                    page_count,
+                    image_pages,
+                )
+                recovered_image_text = await self._recover_image_text(
+                    document,
+                    content,
+                    pdf_path=pdf_path,
+                    require_complete=bool(page_count and image_pages >= page_count),
+                )
+                if recovered_image_text:
+                    fallback_text = self._combine_text_layers(
+                        fallback_text,
+                        recovered_image_text,
+                    )
+        elif not self._has_usable_fallback_text(fallback_text):
             fallback_text = await self._recover_image_text(
                 document,
                 content,
@@ -1104,6 +1159,85 @@ class ProfileAIService:
             return False
         normalized = " ".join((text or "").split())
         return image_count >= 2 or len(normalized) < 1_500
+
+    @staticmethod
+    def _combine_text_layers(text_layer: str | None, recovered_text: str) -> str:
+        recovered = recovered_text.strip()
+        original = (text_layer or "").strip()
+        if original and recovered:
+            return (
+                "[Existing searchable text layer]\n"
+                f"{original}\n\n"
+                "[Text recovered from document page images]\n"
+                f"{recovered}"
+            )
+        return recovered or original
+
+    @staticmethod
+    def _pdf_metrics(
+        *,
+        content: bytes,
+        pdf_path: Path | None,
+    ) -> tuple[int, int]:
+        try:
+            if pdf_path is not None:
+                pdf_context = pymupdf.open(pdf_path)  # type: ignore[no-untyped-call]
+            elif content:
+                pdf_context = pymupdf.open(  # type: ignore[no-untyped-call]
+                    stream=content,
+                    filetype="pdf",
+                )
+            else:
+                return (0, 0)
+
+            with pdf_context as pdf:
+                image_pages = 0
+                for page_index in range(pdf.page_count):
+                    page = pdf.load_page(page_index)
+                    if page.get_images(full=True):
+                        image_pages += 1
+                return (pdf.page_count, image_pages)
+        except Exception as exc:
+            logger.warning("Could not inspect PDF page/image metrics: %s", str(exc))
+            return (0, 0)
+
+    @classmethod
+    def _pdf_text_needs_image_recovery(
+        cls,
+        text: str | None,
+        *,
+        page_count: int,
+        image_pages: int,
+    ) -> bool:
+        if not cls._has_usable_fallback_text(text):
+            return True
+        if page_count <= 0:
+            return False
+
+        normalized = " ".join((text or "").split())
+        chars_per_page = len(normalized) / page_count
+        image_heavy = image_pages >= max(1, (page_count + 1) // 2)
+
+        # Scanned PDFs frequently contain a tiny OCR/text layer with only a repeated
+        # header. That text is technically non-empty but cannot support complete
+        # profile extraction. Recover the actual page images when text density is low.
+        if image_heavy and chars_per_page < 300:
+            return True
+        if page_count >= 3 and chars_per_page < 120:
+            return True
+
+        lines = [
+            " ".join(line.lower().split())
+            for line in (text or "").splitlines()
+            if " ".join(line.split())
+            and not re.fullmatch(r"\[?page\s+\d+\]?", line.strip(), flags=re.IGNORECASE)
+        ]
+        if len(lines) >= 4:
+            unique_ratio = len(set(lines)) / len(lines)
+            if unique_ratio < 0.35 and chars_per_page < 500:
+                return True
+
+        return False
 
     @staticmethod
     def _has_usable_fallback_text(text: str | None) -> bool:

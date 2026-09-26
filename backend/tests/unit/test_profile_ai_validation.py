@@ -75,3 +75,28 @@ def test_normalize_certification_payload_accepts_month_precision() -> None:
 
     assert payload["issue_date"] == "2020-04"
     assert payload["expiry_date"] == "2026"
+
+
+def test_image_heavy_pdf_with_thin_text_forces_page_recovery() -> None:
+    repeated_header = "\n".join(
+        f"[Page {page}]\nOFFICIAL DOCUMENTS TRESOR AHADI" for page in range(1, 17)
+    )
+
+    assert ProfileAIService._pdf_text_needs_image_recovery(
+        repeated_header,
+        page_count=16,
+        image_pages=16,
+    )
+
+
+def test_dense_pdf_text_does_not_force_page_recovery() -> None:
+    dense_text = "\n".join(
+        f"Page {page} employment education certification professional evidence " * 20
+        for page in range(1, 9)
+    )
+
+    assert not ProfileAIService._pdf_text_needs_image_recovery(
+        dense_text,
+        page_count=8,
+        image_pages=8,
+    )
