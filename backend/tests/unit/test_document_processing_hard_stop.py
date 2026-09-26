@@ -7,7 +7,7 @@ from app.services.documents import DocumentService
 def test_stale_processing_document_is_detected() -> None:
     document = SimpleNamespace(
         analysis_status="processing",
-        last_analyzed_at=datetime.now(UTC) - timedelta(minutes=31),
+        last_analyzed_at=datetime.now(UTC) - timedelta(minutes=61),
         created_at=datetime.now(UTC) - timedelta(days=1),
     )
 

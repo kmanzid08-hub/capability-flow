@@ -26,6 +26,7 @@ from app.repositories.people import PersonRepository
 from app.schemas.document import (
     DocumentMetadataUpdate,
 )
+from app.services.document_analysis_jobs import document_analysis_job_running
 from app.services.document_storage import (
     DocumentTooLarge,
     InvalidDocumentFile,
@@ -91,7 +92,7 @@ class DocumentService:
                 detail="Person not found",
             )
 
-    _PROCESSING_TIMEOUT = timedelta(minutes=30)
+    _PROCESSING_TIMEOUT = timedelta(minutes=60)
 
     @classmethod
     def _processing_reference(cls, document: PersonDocument) -> datetime | None:
@@ -120,24 +121,35 @@ class DocumentService:
         self,
         documents: list[PersonDocument],
     ) -> None:
-        changed = False
+        changed_documents: list[PersonDocument] = []
         for document in documents:
+            if document_analysis_job_running(
+                self.organization_id,
+                document.person_id,
+                document.id,
+            ):
+                continue
             if not self._is_stale_processing(document):
                 continue
             document.analysis_status = "failed"
             document.analysis_error = (
                 "Document analysis was stopped because it remained in Processing "
-                "for more than 30 minutes. The document is safe. Start Analyze again."
+                "for more than 60 minutes. The document is safe. Start Analyze again."
             )
             document.last_analyzed_at = datetime.now(UTC)
-            changed = True
+            changed_documents.append(document)
             logger.warning(
                 "Recovered stale document analysis: person_id=%s document_id=%s",
                 document.person_id,
                 document.id,
             )
-        if changed:
+        if changed_documents:
             await self.session.commit()
+            # TimestampMixin.updated_at is populated by SQLAlchemy/DB on UPDATE and can be
+            # expired after commit. Refresh before FastAPI serializes these ORM objects,
+            # otherwise async lazy loading can raise MissingGreenlet.
+            for document in changed_documents:
+                await self.session.refresh(document)
 
     async def list_documents(
         self,
@@ -368,4 +380,3 @@ class DocumentService:
         await self.session.commit()
 
         await self.storage.delete(storage_key)
-

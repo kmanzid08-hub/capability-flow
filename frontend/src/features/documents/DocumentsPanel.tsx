@@ -16,14 +16,12 @@ import {
   X
 } from "lucide-react";
 import React from "react";
-import { session } from "../../lib/session";
-
 import {
   Button,
   Field
 } from "../../components/ui";
 import {
-  AI_ANALYSIS_TIMEOUT_MS,
+  ApiError,
   api,
   apiBlob,
   apiDownload
@@ -46,6 +44,111 @@ import { useWorkspace } from "../../lib/workspace";
 import { SuggestionCard } from "./SuggestionCard";
 import { documentTypeOptions, normalizeSuggestionPayload, validateDocumentSelection } from "./suggestions";
 import { UploadZone } from "./UploadZone";
+
+const DOCUMENT_ANALYSIS_POLL_MS = 4_000;
+const DOCUMENT_ANALYSIS_RESUME_MS = 20_000;
+const DOCUMENT_ANALYSIS_WAIT_MS = 50 * 60_000;
+const DOCUMENT_ANALYSIS_REQUEST_TIMEOUT_MS = 60_000;
+
+function waitForAnalysisDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new ApiError(0, "Request aborted by user."));
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      signal.removeEventListener("abort", cancel);
+      resolve();
+    }, ms);
+    const cancel = () => {
+      window.clearTimeout(timeout);
+      reject(new ApiError(0, "Request aborted by user."));
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+  });
+}
+
+async function queueDocumentAnalysis(
+  personId: string,
+  documentId: string,
+  signal: AbortSignal,
+): Promise<void> {
+  await api(`/people/${personId}/documents/${documentId}/analyze/start`, {
+    method: "POST",
+    timeoutMs: DOCUMENT_ANALYSIS_REQUEST_TIMEOUT_MS,
+    signal,
+  });
+}
+
+async function analyzeDocumentWithRecovery(
+  personId: string,
+  documentId: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const startedAt = Date.now();
+  let nextResumeAt = startedAt + DOCUMENT_ANALYSIS_RESUME_MS;
+  let observedProcessing = false;
+
+  while (true) {
+    try {
+      await queueDocumentAnalysis(personId, documentId, signal);
+      break;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (!(error instanceof ApiError) || error.status !== 0) throw error;
+      if (Date.now() - startedAt >= DOCUMENT_ANALYSIS_WAIT_MS) throw error;
+      await waitForAnalysisDelay(DOCUMENT_ANALYSIS_POLL_MS, signal);
+    }
+  }
+
+  while (Date.now() - startedAt < DOCUMENT_ANALYSIS_WAIT_MS) {
+    let items: PersonDocument[];
+    try {
+      items = await api<PersonDocument[]>(`/people/${personId}/documents`, {
+        timeoutMs: DOCUMENT_ANALYSIS_REQUEST_TIMEOUT_MS,
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (!(error instanceof ApiError) || error.status !== 0) throw error;
+      await waitForAnalysisDelay(DOCUMENT_ANALYSIS_POLL_MS, signal);
+      continue;
+    }
+
+    const document = items.find((item) => item.id === documentId);
+    if (!document) throw new ApiError(404, "Document not found.");
+
+    if (document.analysis_status === "processing") observedProcessing = true;
+    if (document.analysis_status === "failed") {
+      throw new Error(document.analysis_error ?? "Document analysis failed.");
+    }
+    if (
+      (document.analysis_status === "ready_for_review" ||
+        document.analysis_status === "complete") &&
+      (observedProcessing || Date.now() - startedAt >= 10_000)
+    ) {
+      return;
+    }
+
+    if (Date.now() >= nextResumeAt) {
+      try {
+        await queueDocumentAnalysis(personId, documentId, signal);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!(error instanceof ApiError) || error.status !== 0) throw error;
+      }
+      nextResumeAt = Date.now() + DOCUMENT_ANALYSIS_RESUME_MS;
+    }
+
+    await waitForAnalysisDelay(DOCUMENT_ANALYSIS_POLL_MS, signal);
+  }
+
+  throw new Error(
+    "Document analysis is still running after 50 minutes. The file is safe; " +
+      "refresh its status before starting another analysis.",
+  );
+}
+
 export function DocumentsPanel({ personId, view = "documents" }: { personId: string; view?: "documents" | "review"; }) {
   const { canWrite, canReview } = useWorkspace();
   const [uploadPercent, setUploadPercent] = React.useState(0);
@@ -80,16 +183,10 @@ export function DocumentsPanel({ personId, view = "documents" }: { personId: str
   const analysisAbortRequested = React.useRef(false);
 
   React.useEffect(() => {
-    const workspace = session.snapshot();
     return () => {
-      const controller = analysisAbortController.current;
-      if (controller && !controller.signal.aborted) {
-        analysisAbortRequested.current = true;
-        controller.abort();
-        if (session.snapshot() === workspace) {
-          void api(`/people/${personId}/analysis/abort`, { method: "POST", timeoutMs: 10000 }).catch(() => undefined);
-        }
-      }
+      // Stop only this page's polling. The server-side analysis continues so
+      // navigating away or refreshing does not destroy a large-document job.
+      analysisAbortController.current?.abort();
     };
   }, [personId]);
 
@@ -98,6 +195,23 @@ export function DocumentsPanel({ personId, view = "documents" }: { personId: str
     queryFn: ({ signal }) => api<PersonDocument[]>(`/people/${personId}/documents`, { signal }),
     refetchInterval: (query) => query.state.data?.some((doc) => doc.analysis_status === "processing") ? 5000 : false,
   });
+  const processingDocumentSignature = (documents.data ?? [])
+    .filter((document) => document.analysis_status === "processing")
+    .map((document) => document.id)
+    .sort()
+    .join("|");
+
+  React.useEffect(() => {
+    if (!processingDocumentSignature) return;
+    for (const documentId of processingDocumentSignature.split("|")) {
+      // Idempotent start doubles as recovery after a Render restart. The server
+      // refuses to create a duplicate local job when one is already running.
+      void api(`/people/${personId}/documents/${documentId}/analyze/start`, {
+        method: "POST",
+        timeoutMs: DOCUMENT_ANALYSIS_REQUEST_TIMEOUT_MS,
+      }).catch(() => undefined);
+    }
+  }, [personId, processingDocumentSignature]);
   const suggestions = useQuery({
     queryKey: qk("profile-suggestions", personId),
     queryFn: () =>
@@ -184,11 +298,11 @@ export function DocumentsPanel({ personId, view = "documents" }: { personId: str
       const document = documents.data?.find((item) => item.id === documentId);
       setBatchProgress(`Analyzing: ${document?.title ?? "document"}`);
       try {
-        await api(`/people/${personId}/documents/${documentId}/analyze`, {
-          method: "POST",
-          timeoutMs: AI_ANALYSIS_TIMEOUT_MS,
-          signal: controller.signal,
-        });
+        await analyzeDocumentWithRecovery(
+          personId,
+          documentId,
+          controller.signal,
+        );
         return { aborted: false };
       } catch (error) {
         if (controller.signal.aborted) {
@@ -226,9 +340,11 @@ export function DocumentsPanel({ personId, view = "documents" }: { personId: str
           const document = items[index];
           setBatchProgress(`Analyzing ${index + 1} of ${items.length}: ${document.title}`);
           try {
-            await api(`/people/${personId}/documents/${document.id}/analyze`, {
-              method: "POST", timeoutMs: AI_ANALYSIS_TIMEOUT_MS, signal: controller.signal,
-            });
+            await analyzeDocumentWithRecovery(
+              personId,
+              document.id,
+              controller.signal,
+            );
             processed += 1;
           } catch (error) {
             if (controller.signal.aborted) return { aborted: true, processed, total: items.length };

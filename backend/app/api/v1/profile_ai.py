@@ -17,6 +17,10 @@ from app.services.analysis_control import (
     register_analysis_task,
     unregister_analysis_task,
 )
+from app.services.document_analysis_jobs import (
+    document_analysis_job_running,
+    schedule_document_analysis_job,
+)
 from app.services.profile_ai import ProfileAIService
 
 router = APIRouter(prefix="/people/{person_id}", tags=["profile-ai"])
@@ -58,6 +62,49 @@ def _require(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This role cannot perform that action",
         )
+
+
+@router.post(
+    "/documents/{document_id}/analyze/start",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_document_analysis(
+    person_id: uuid.UUID,
+    document_id: uuid.UUID,
+    membership: ActiveMembership,
+    user: CurrentUser,
+    session: SessionDep,
+) -> dict[str, str]:
+    _require(membership.role, ANALYZE_ROLES)
+
+    service = _service(session, membership, user)
+    document = await service.documents.get(person_id, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Person or document not found",
+        )
+
+    if document_analysis_job_running(
+        membership.organization_id,
+        person_id,
+        document_id,
+    ):
+        return {
+            "status": "running",
+            "document_id": str(document_id),
+        }
+
+    scheduled = schedule_document_analysis_job(
+        organization_id=membership.organization_id,
+        user_id=user.id,
+        person_id=person_id,
+        document_id=document_id,
+    )
+    return {
+        "status": "queued" if scheduled else "running",
+        "document_id": str(document_id),
+    }
 
 
 @router.post(

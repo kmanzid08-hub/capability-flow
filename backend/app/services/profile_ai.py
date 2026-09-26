@@ -366,11 +366,13 @@ class ProfileAIService:
         self.storage = create_document_storage(self.settings)
         self.fallback_ai = FallbackAI(self.settings)
 
-    _PROCESSING_TIMEOUT = timedelta(minutes=30)
+    _PROCESSING_TIMEOUT = timedelta(minutes=60)
 
     @classmethod
     def _processing_reference(cls, document: PersonDocument) -> datetime | None:
-        value = getattr(document, "last_analyzed_at", None)
+        value = getattr(document, "updated_at", None)
+        if value is None:
+            value = getattr(document, "last_analyzed_at", None)
         if value is None:
             value = getattr(document, "created_at", None)
         if value is None:
@@ -389,7 +391,13 @@ class ProfileAIService:
             return True
         return datetime.now(UTC) - reference > cls._PROCESSING_TIMEOUT
 
-    async def analyze_document(self, person_id: uuid.UUID, document_id: uuid.UUID) -> int:
+    async def analyze_document(
+        self,
+        person_id: uuid.UUID,
+        document_id: uuid.UUID,
+        *,
+        resume_processing: bool = False,
+    ) -> int:
         person = await self.people.get(person_id)
         document = await self.documents.get(person_id, document_id)
 
@@ -409,7 +417,13 @@ class ProfileAIService:
             )
 
         if document.analysis_status == DocumentAnalysisStatus.PROCESSING.value:
-            if self._is_stale_processing(document):
+            if resume_processing:
+                logger.warning(
+                    "Resuming detached document analysis: person_id=%s document_id=%s",
+                    person_id,
+                    document_id,
+                )
+            elif self._is_stale_processing(document):
                 await self._mark_analysis_failed(
                     document_id,
                     "The previous analysis was stale and has been stopped. Start Analyze again.",
@@ -433,6 +447,8 @@ class ProfileAIService:
         document.analysis_error = None
         await self.session.commit()
 
+        analysis_timeout_minutes = 45 if document.file_size >= 10 * 1024 * 1024 else 20
+
         try:
             if is_temporary_document_filename(document.original_filename):
                 raise UnsupportedAnalysisDocument(
@@ -446,7 +462,7 @@ class ProfileAIService:
             if extension == ".pdf" and document.file_size > direct_media_limit:
                 result = await asyncio.wait_for(
                     self._analyze_large_pdf(person, document),
-                    timeout=20 * 60,
+                    timeout=analysis_timeout_minutes * 60,
                 )
             else:
                 content = await self.storage.read(document.storage_key)
@@ -483,7 +499,7 @@ class ProfileAIService:
                         content=content,
                         text=text,
                     ),
-                    timeout=20 * 60,
+                    timeout=analysis_timeout_minutes * 60,
                 )
             suggestions = self._build_suggestions(person_id, document_id, result)
             if not suggestions:
@@ -516,8 +532,8 @@ class ProfileAIService:
         except TimeoutError as exc:
             await self.session.rollback()
             message = (
-                "Document analysis timed out after 20 minutes. Your document is safe. "
-                "Please retry the analysis."
+                f"Document analysis timed out after {analysis_timeout_minutes} minutes. "
+                "Your document is safe. Please retry the analysis."
             )
             await self._mark_analysis_failed(document_id, message)
             logger.error(
