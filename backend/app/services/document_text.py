@@ -99,13 +99,167 @@ def detect_word_content_type(content: bytes, extension: str) -> str:
     return extension
 
 
+def _find_legacy_jpeg_end(content: bytes, start: int, max_bytes: int) -> int | None:
+    """Return the end offset for a JPEG embedded in a legacy Word binary."""
+    limit = min(len(content), start + max_bytes)
+    position = start + 2
+
+    while position + 1 < limit:
+        marker_start = content.find(b"\xff", position, limit)
+        if marker_start < 0 or marker_start + 1 >= limit:
+            return None
+
+        marker_pos = marker_start + 1
+        while marker_pos < limit and content[marker_pos] == 0xFF:
+            marker_pos += 1
+        if marker_pos >= limit:
+            return None
+
+        marker = content[marker_pos]
+        if marker == 0xD9:
+            return marker_pos + 1
+        if marker == 0x00 or 0xD0 <= marker <= 0xD7 or marker == 0x01:
+            position = marker_pos + 1
+            continue
+
+        if marker_pos + 2 >= limit:
+            return None
+        segment_length = int.from_bytes(content[marker_pos + 1 : marker_pos + 3], "big")
+        if segment_length < 2:
+            return None
+
+        segment_end = marker_pos + 1 + segment_length
+        if segment_end > limit:
+            return None
+
+        if marker == 0xDA:
+            # Start-of-scan data uses byte stuffing. Only an unstuffed marker can
+            # terminate the compressed scan, so walk until the next real marker.
+            scan_pos = segment_end
+            while scan_pos + 1 < limit:
+                ff_pos = content.find(b"\xff", scan_pos, limit)
+                if ff_pos < 0 or ff_pos + 1 >= limit:
+                    return None
+                code_pos = ff_pos + 1
+                while code_pos < limit and content[code_pos] == 0xFF:
+                    code_pos += 1
+                if code_pos >= limit:
+                    return None
+                code = content[code_pos]
+                if code == 0x00 or 0xD0 <= code <= 0xD7:
+                    scan_pos = code_pos + 1
+                    continue
+                position = ff_pos
+                break
+            else:
+                return None
+            continue
+
+        position = segment_end
+
+    return None
+
+
+def _find_legacy_png_end(content: bytes, start: int, max_bytes: int) -> int | None:
+    """Return the end offset for a PNG embedded in a legacy Word binary."""
+    position = start + len(b"\x89PNG\r\n\x1a\n")
+    limit = min(len(content), start + max_bytes)
+
+    while position + 12 <= limit:
+        length = int.from_bytes(content[position : position + 4], "big")
+        chunk_type = content[position + 4 : position + 8]
+        chunk_end = position + 12 + length
+        if chunk_end > limit:
+            return None
+        if chunk_type == b"IEND":
+            return chunk_end
+        position = chunk_end
+    return None
+
+
+def _extract_legacy_doc_images(
+    content: bytes,
+    max_images: int,
+) -> list[tuple[bytes, str, str]]:
+    """Recover raster images directly from a binary Microsoft Word .doc file."""
+    if max_images <= 0:
+        return []
+
+    max_image_bytes = 12 * 1024 * 1024
+    min_image_bytes = 4 * 1024
+    candidates: list[tuple[int, int, int, str, str]] = []
+
+    jpeg_signature = b"\xff\xd8\xff"
+    position = 0
+    jpeg_number = 0
+    while True:
+        start = content.find(jpeg_signature, position)
+        if start < 0:
+            break
+        end = _find_legacy_jpeg_end(content, start, max_image_bytes)
+        if end is None:
+            position = start + len(jpeg_signature)
+            continue
+        image_data = content[start:end]
+        jpeg_number += 1
+        if min_image_bytes <= len(image_data) <= max_image_bytes:
+            candidates.append(
+                (
+                    start,
+                    end,
+                    len(image_data),
+                    "image/jpeg",
+                    f"legacy-word-image-{jpeg_number:02d}.jpg",
+                )
+            )
+        position = end
+
+    png_signature = b"\x89PNG\r\n\x1a\n"
+    position = 0
+    png_number = 0
+    while True:
+        start = content.find(png_signature, position)
+        if start < 0:
+            break
+        end = _find_legacy_png_end(content, start, max_image_bytes)
+        if end is None:
+            position = start + len(png_signature)
+            continue
+        image_data = content[start:end]
+        png_number += 1
+        if min_image_bytes <= len(image_data) <= max_image_bytes:
+            candidates.append(
+                (
+                    start,
+                    end,
+                    len(image_data),
+                    "image/png",
+                    f"legacy-word-image-{png_number:02d}.png",
+                )
+            )
+        position = end
+
+    if not candidates:
+        return []
+
+    # Large images are more likely to be scanned pages than logos or icons. Keep
+    # the strongest candidates, then restore binary order so evidence follows the
+    # original document sequence.
+    selected = sorted(candidates, key=lambda item: item[2], reverse=True)[:max_images]
+    selected.sort(key=lambda item: item[0])
+    return [(content[start:end], mime_type, label) for start, end, _, mime_type, label in selected]
+
+
 def extract_embedded_document_images(
     content: bytes,
     extension: str,
     max_images: int,
 ) -> list[tuple[bytes, str, str]]:
-    """Extract supported embedded images from OOXML Word documents without rendering them."""
-    if detect_word_content_type(content, extension) != ".docx":
+    """Extract supported embedded images from Word documents without rendering them."""
+    actual_type = detect_word_content_type(content, extension)
+    if actual_type == ".doc":
+        return _extract_legacy_doc_images(content, max_images)
+    if actual_type != ".docx":
         return []
 
     try:

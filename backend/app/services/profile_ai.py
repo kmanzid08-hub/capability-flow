@@ -471,6 +471,24 @@ class ProfileAIService:
                         "This document is empty (0 KB). Delete it and upload the original file."
                     )
 
+                if extension == ".doc":
+                    embedded_image_count = len(
+                        extract_embedded_document_images(
+                            content,
+                            extension,
+                            self.settings.ai_docx_vision_max_images,
+                        )
+                    )
+                    if embedded_image_count >= 10:
+                        analysis_timeout_minutes = max(analysis_timeout_minutes, 45)
+                        logger.info(
+                            "Image-heavy legacy Word document detected: file=%s images=%s "
+                            "timeout_minutes=%s",
+                            document.original_filename,
+                            embedded_image_count,
+                            analysis_timeout_minutes,
+                        )
+
                 text: str | None = None
                 if not is_gemini_native_document(extension):
                     try:
@@ -721,6 +739,52 @@ class ProfileAIService:
         pdf_path: Path | None = None,
         force_fallback: bool = False,
     ) -> dict[str, Any]:
+        extension = document.file_extension.lower()
+
+        # Legacy binary Word files often contain scanned certificates as embedded
+        # JPEG/PNG objects while their text layer contains only a title or a few
+        # typed words. A short but non-empty text layer must not suppress vision
+        # recovery, otherwise the analysis looks successful while missing most of
+        # the professional evidence in the file.
+        if extension == ".doc" and content:
+            embedded_images = extract_embedded_document_images(
+                content,
+                extension,
+                self.settings.ai_docx_vision_max_images,
+            )
+            if embedded_images:
+                normalized_text = " ".join((text or "").split())
+                if self._legacy_word_needs_image_recovery(text, len(embedded_images)):
+                    logger.info(
+                        "Enriching legacy Word text with embedded scans: file=%s images=%s "
+                        "local_chars=%s",
+                        document.original_filename,
+                        len(embedded_images),
+                        len(normalized_text),
+                    )
+                    recovered_image_text = await self._recover_image_text(
+                        document,
+                        content,
+                        require_complete=True,
+                    )
+                    if recovered_image_text:
+                        if text and text.strip():
+                            text = (
+                                "[Legacy Word text layer]\n"
+                                f"{text.strip()}\n\n"
+                                "[Text recovered from embedded document scans]\n"
+                                f"{recovered_image_text.strip()}"
+                            )
+                        else:
+                            text = recovered_image_text
+                    elif len(embedded_images) >= 2:
+                        raise DocumentTextRecoveryUnavailable(
+                            "This legacy Word document contains embedded scanned pages, but "
+                            "AI vision could not read them. Analysis was stopped to avoid "
+                            "creating an incomplete profile. Retry later or save the file as "
+                            "a PDF and analyze it again."
+                        )
+
         # Large profile documents must be analyzed as bounded evidence chunks.
         # Sending the entire CV to one structured-output call can exhaust the
         # model's output budget even when the input fits the context window.
@@ -874,6 +938,7 @@ class ProfileAIService:
         document: PersonDocument,
         content: bytes,
         pdf_path: Path | None = None,
+        require_complete: bool = False,
     ) -> str | None:
         extension = document.file_extension.lower()
         images: list[tuple[bytes, str, str]] = []
@@ -934,6 +999,13 @@ class ProfileAIService:
                 )
 
         combined = "\n\n".join(recovered).strip()
+        if require_complete and len(recovered) < len(images):
+            raise GeminiTemporarilyUnavailable(
+                "AI vision recovered "
+                f"{len(recovered)} of {len(images)} embedded document scans. "
+                "Analysis was stopped to avoid creating an incomplete profile. "
+                "Retry when the AI providers are available again."
+            )
         if combined:
             logger.info(
                 "Recovered image-based document text: file=%s pages=%s providers=%s",
@@ -1025,6 +1097,13 @@ class ProfileAIService:
             self.settings.ai_pdf_render_dpi,
         )
         return images
+
+    @staticmethod
+    def _legacy_word_needs_image_recovery(text: str | None, image_count: int) -> bool:
+        if image_count <= 0:
+            return False
+        normalized = " ".join((text or "").split())
+        return image_count >= 2 or len(normalized) < 1_500
 
     @staticmethod
     def _has_usable_fallback_text(text: str | None) -> bool:
