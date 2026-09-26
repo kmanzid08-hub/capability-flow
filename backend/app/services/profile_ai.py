@@ -1080,9 +1080,7 @@ class ProfileAIService:
                 if not profile.summary or len(text) > len(profile.summary):
                     profile = profile.model_copy(update={"summary": text})
             elif category == "skill":
-                skills.append(
-                    AIChunkSkill(name=item.title, confidence=item.confidence)
-                )
+                skills.append(AIChunkSkill(name=item.title, confidence=item.confidence))
             elif category == "education":
                 education.append(
                     AIChunkEducation(
@@ -1430,8 +1428,7 @@ class ProfileAIService:
                     payload = self._normalize_experience_payload(payload, category)
                     if category == "employment" and not payload.get("start_date"):
                         logger.info(
-                            "Skipping undated AI employment suggestion: "
-                            "document_id=%s title=%s",
+                            "Skipping undated AI employment suggestion: document_id=%s title=%s",
                             document_id,
                             payload.get(title_key) or category.title(),
                         )
@@ -1918,7 +1915,7 @@ class ProfileAIService:
 
         if suggestion.category == "skill":
             payload["proficiency"] = self._normalize_skill_proficiency(payload.get("proficiency"))
-            skill_data = SkillCreate.model_construct(**cast(Any, payload))
+            skill_data = SkillCreate.model_validate(payload)
             existing_skill = await self.session.scalar(
                 select(PersonSkill).where(
                     PersonSkill.organization_id == self.organization_id,
@@ -1939,7 +1936,7 @@ class ProfileAIService:
 
         if suggestion.category == "education":
             payload["degree_level"] = self._normalize_degree_level(payload.get("degree_level"))
-            education_data = EducationCreate.model_construct(**cast(Any, payload))
+            education_data = EducationCreate.model_validate(payload)
             education_entity = PersonEducation(
                 organization_id=self.organization_id,
                 person_id=person_id,
@@ -1950,7 +1947,7 @@ class ProfileAIService:
             return "education", education_entity.id
 
         if suggestion.category == "certification":
-            certification_data = CertificationCreate.model_construct(**cast(Any, payload))
+            certification_data = CertificationCreate.model_validate(payload)
             certification_values = certification_data.model_dump(mode="python")
             if certification_values.get("verification_url") is not None:
                 certification_values["verification_url"] = str(
@@ -1966,7 +1963,7 @@ class ProfileAIService:
             return "certification", certification_entity.id
 
         if suggestion.category == "employment":
-            employment_data = EmploymentCreate.model_construct(**cast(Any, payload))
+            employment_data = EmploymentCreate.model_validate(payload)
             employment_entity = EmploymentExperience(
                 organization_id=self.organization_id,
                 person_id=person_id,
@@ -1977,7 +1974,7 @@ class ProfileAIService:
             return "employment", employment_entity.id
 
         if suggestion.category == "project":
-            project_data = ProjectCreate.model_construct(**cast(Any, payload))
+            project_data = ProjectCreate.model_validate(payload)
             project_entity = ProjectExperience(
                 organization_id=self.organization_id,
                 person_id=person_id,
