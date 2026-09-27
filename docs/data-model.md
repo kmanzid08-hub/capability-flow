@@ -11,3 +11,6 @@ Membership roles are `owner`, `admin`, `manager`, `data_entry`, `reviewer`, and 
 
 Future qualifications, skills, experience, evidence, opportunities, and requirements must carry `organization_id` even when tenant ownership could be inferred through a parent. This supports direct policy enforcement and auditing.
 
+- **AIJob**: organization-owned durable work item for document or opportunity analysis. It records the requesting user, job/entity type, active de-duplication key, queue status, attempt count, scheduling time, worker lease/heartbeat, cancellation request, terminal result, and sanitized failure information. Active jobs are unique by `active_key`; terminal jobs clear that key so the same entity can be analyzed again later.
+
+AI job states are `queued`, `running`, `retrying`, `succeeded`, `failed`, and `cancelled`. A `running` job is owned only while its lease is valid. Expired leases are reclaimable, which is the crash/restart recovery invariant for long-running AI work.

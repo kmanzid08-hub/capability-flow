@@ -13,8 +13,10 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.ai_job import AIJobType
 from app.models.document import PersonDocument
 from app.models.enums import DocumentType
+from app.repositories.ai_jobs import AIJobRepository
 from app.repositories.capabilities import (
     CertificationRepository,
     EducationRepository,
@@ -26,7 +28,6 @@ from app.repositories.people import PersonRepository
 from app.schemas.document import (
     DocumentMetadataUpdate,
 )
-from app.services.document_analysis_jobs import document_analysis_job_running
 from app.services.document_storage import (
     DocumentTooLarge,
     InvalidDocumentFile,
@@ -66,6 +67,11 @@ class DocumentService:
         )
 
         self.documents = DocumentRepository(
+            session,
+            organization_id,
+        )
+
+        self.ai_jobs = AIJobRepository(
             session,
             organization_id,
         )
@@ -122,12 +128,12 @@ class DocumentService:
         documents: list[PersonDocument],
     ) -> None:
         changed_documents: list[PersonDocument] = []
+        active_job_ids = await self.ai_jobs.active_entity_ids(
+            AIJobType.DOCUMENT_ANALYSIS,
+            [document.id for document in documents],
+        )
         for document in documents:
-            if document_analysis_job_running(
-                self.organization_id,
-                document.person_id,
-                document.id,
-            ):
+            if document.id in active_job_ids:
                 continue
             if not self._is_stale_processing(document):
                 continue

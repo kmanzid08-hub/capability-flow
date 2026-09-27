@@ -12,14 +12,11 @@ from app.schemas.profile_ai import (
     ProfileSuggestionResponse,
     SuggestionEdit,
 )
+from app.services.ai_jobs import AIJobQueueFull, AIJobService
 from app.services.analysis_control import (
     abort_active_analysis,
     register_analysis_task,
     unregister_analysis_task,
-)
-from app.services.document_analysis_jobs import (
-    document_analysis_job_running,
-    schedule_document_analysis_job,
 )
 from app.services.profile_ai import ProfileAIService
 
@@ -85,25 +82,26 @@ async def start_document_analysis(
             detail="Person or document not found",
         )
 
-    if document_analysis_job_running(
-        membership.organization_id,
-        person_id,
-        document_id,
-    ):
-        return {
-            "status": "running",
-            "document_id": str(document_id),
-        }
+    try:
+        enqueued = await AIJobService(
+            session,
+            membership.organization_id,
+            user.id,
+        ).enqueue_document(
+            person_id=person_id,
+            document_id=document_id,
+        )
+    except AIJobQueueFull as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+            headers={"Retry-After": "15"},
+        ) from exc
 
-    scheduled = schedule_document_analysis_job(
-        organization_id=membership.organization_id,
-        user_id=user.id,
-        person_id=person_id,
-        document_id=document_id,
-    )
     return {
-        "status": "queued" if scheduled else "running",
+        "status": "queued" if enqueued.created else "running",
         "document_id": str(document_id),
+        "job_id": str(enqueued.job.id),
     }
 
 
@@ -170,16 +168,25 @@ async def abort_analysis(
     person_id: uuid.UUID,
     membership: ActiveMembership,
     user: CurrentUser,
+    session: SessionDep,
 ) -> dict[str, int | bool]:
     _require(
         membership.role,
         ANALYZE_ROLES,
     )
-    cancelled = abort_active_analysis(
+    durable_cancelled = await AIJobService(
+        session,
+        membership.organization_id,
+        user.id,
+    ).cancel_document_jobs(person_id)
+    # Persist the cancellation request before cancelling any local task. The
+    # worker can then distinguish a user abort from an infrastructure shutdown.
+    local_cancelled = abort_active_analysis(
         membership.organization_id,
         user.id,
         person_id,
     )
+    cancelled = max(local_cancelled, durable_cancelled)
     return {
         "aborted": cancelled > 0,
         "requests_cancelled": cancelled,

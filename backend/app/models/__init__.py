@@ -1,3 +1,4 @@
+from app.models.ai_job import AIJob
 from app.models.capability import (
     PersonCertification,
     PersonEducation,
@@ -27,6 +28,7 @@ from app.models.person import Person
 from app.models.user import User
 
 __all__ = [
+    "AIJob",
     "CandidateMatch",
     "CapabilityGap",
     "EmploymentExperience",

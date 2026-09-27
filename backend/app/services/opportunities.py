@@ -595,7 +595,17 @@ class OpportunityService:
 
         await self.session.commit()
 
-    async def analyze(self, opportunity_id: uuid.UUID) -> OpportunityAnalysis:
+    async def analyze(
+        self,
+        opportunity_id: uuid.UUID,
+        *,
+        resume_interrupted: bool = False,
+    ) -> OpportunityAnalysis:
+        if resume_interrupted:
+            await self._recover_stale_analysis(
+                opportunity_id,
+                max_age=timedelta(seconds=0),
+            )
         opportunity = await self.get(opportunity_id)
         workflow_status = opportunity.status
         workflow_locked = workflow_status in {

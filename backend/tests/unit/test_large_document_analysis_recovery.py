@@ -1,9 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
+from app.models.ai_job import AIJobType
 from app.services.documents import DocumentService
 from app.services.profile_ai import ProfileAIService
 
@@ -29,13 +30,24 @@ class _FakeSession:
 
     async def refresh(self, document: object) -> None:
         self.refreshed.append(document)
-        document.updated_at = datetime.now(UTC)
+        document.updated_at = datetime.now(UTC)  # type: ignore[attr-defined]
+
+
+class _FakeAIJobs:
+    def __init__(self, active: set[UUID] | None = None) -> None:
+        self.active = active or set()
+
+    async def active_entity_ids(
+        self,
+        job_type: AIJobType,
+        entity_ids: list[UUID],
+    ) -> set[UUID]:
+        assert job_type == AIJobType.DOCUMENT_ANALYSIS
+        return self.active.intersection(entity_ids)
 
 
 @pytest.mark.asyncio
-async def test_stale_recovery_refreshes_server_updated_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_stale_recovery_refreshes_server_updated_fields() -> None:
     document = SimpleNamespace(
         id=uuid4(),
         person_id=uuid4(),
@@ -49,14 +61,34 @@ async def test_stale_recovery_refreshes_server_updated_fields(
     service = object.__new__(DocumentService)
     service.session = session
     service.organization_id = uuid4()
-
-    monkeypatch.setattr(
-        "app.services.documents.document_analysis_job_running",
-        lambda *_args: False,
-    )
+    service.ai_jobs = _FakeAIJobs()
 
     await service._recover_stale_processing([document])
 
     assert document.analysis_status == "failed"
     assert session.commits == 1
     assert session.refreshed == [document]
+
+
+@pytest.mark.asyncio
+async def test_stale_recovery_does_not_fail_durable_active_job() -> None:
+    document = SimpleNamespace(
+        id=uuid4(),
+        person_id=uuid4(),
+        analysis_status="processing",
+        analysis_error=None,
+        updated_at=datetime.now(UTC) - timedelta(minutes=90),
+        last_analyzed_at=None,
+        created_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    session = _FakeSession()
+    service = object.__new__(DocumentService)
+    service.session = session
+    service.organization_id = uuid4()
+    service.ai_jobs = _FakeAIJobs({document.id})
+
+    await service._recover_stale_processing([document])
+
+    assert document.analysis_status == "processing"
+    assert session.commits == 0
+    assert session.refreshed == []

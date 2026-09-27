@@ -1,5 +1,4 @@
 import uuid
-from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
@@ -12,7 +11,7 @@ from app.models.opportunity import (
     OpportunityAnalysis,
     OpportunitySource,
 )
-from app.models.opportunity_enums import AnalysisStatus, OpportunitySourceType, OpportunityStatus
+from app.models.opportunity_enums import AnalysisStatus, OpportunitySourceType
 from app.models.person import Person
 from app.schemas.opportunity import (
     AnalysisResponse,
@@ -33,11 +32,8 @@ from app.schemas.opportunity import (
     TextIntakeCreate,
     UrlIntakeCreate,
 )
+from app.services.ai_jobs import AIJobQueueFull, AIJobService
 from app.services.opportunities import OpportunityService
-from app.services.opportunity_analysis_jobs import (
-    opportunity_analysis_job_running,
-    schedule_opportunity_analysis_job,
-)
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
 WRITE_ROLES = {
@@ -365,7 +361,6 @@ async def start_opportunity_analysis(
         )
 
     latest = await svc.repo.latest_analysis(opportunity_id)
-    now = datetime.now(UTC)
     active_statuses = {
         AnalysisStatus.QUEUED,
         AnalysisStatus.FETCHING,
@@ -387,61 +382,30 @@ async def start_opportunity_analysis(
             "target_version": latest.version,
         }
 
-    if opportunity_analysis_job_running(opportunity_id):
-        target_version = (
-            latest.version
-            if latest is not None and latest.status in active_statuses
-            else (latest.version if latest is not None else 0) + 1
-        )
-        return {
-            "status": "running",
-            "opportunity_id": str(opportunity_id),
-            "target_version": target_version,
-        }
+    target_version = (
+        latest.version
+        if latest is not None and latest.status in active_statuses
+        else (latest.version if latest is not None else 0) + 1
+    )
 
-    if latest is not None and latest.status in active_statuses:
-        touched_at = latest.updated_at or latest.started_at or latest.created_at
-        if touched_at is not None and touched_at.tzinfo is None:
-            touched_at = touched_at.replace(tzinfo=UTC)
-
-        # Give a just-started legacy synchronous request a short grace period.
-        # New background jobs are tracked in-process, so after a server restart
-        # the frontend can safely reassert /analyze/start and recover quickly.
-        if touched_at is not None and now - touched_at < timedelta(minutes=1):
-            return {
-                "status": "running",
-                "opportunity_id": str(opportunity_id),
-                "target_version": latest.version,
-            }
-
-        latest.status = AnalysisStatus.FAILED
-        latest.error_message = (
-            "Previous analysis was interrupted by a server restart or lost worker. "
-            "A new analysis has been started."
-        )
-        latest.completed_at = now
-        if opportunity.status == OpportunityStatus.ANALYZING:
-            opportunity.status = OpportunityStatus.NEEDS_REVIEW
-        await session.commit()
-
-    previous_version = latest.version if latest is not None else 0
-    target_version = previous_version + 1
-
-    if not schedule_opportunity_analysis_job(
-        opportunity_id,
-        membership.organization_id,
-        user.id,
-    ):
-        return {
-            "status": "running",
-            "opportunity_id": str(opportunity_id),
-            "target_version": target_version,
-        }
+    try:
+        enqueued = await AIJobService(
+            session,
+            membership.organization_id,
+            user.id,
+        ).enqueue_opportunity(opportunity_id=opportunity_id)
+    except AIJobQueueFull as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+            headers={"Retry-After": "15"},
+        ) from exc
 
     return {
-        "status": "queued",
+        "status": "queued" if enqueued.created else "running",
         "opportunity_id": str(opportunity_id),
         "target_version": target_version,
+        "job_id": str(enqueued.job.id),
     }
 
 

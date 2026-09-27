@@ -51,6 +51,21 @@ class Settings(BaseSettings):
     ai_docx_vision_max_images: int = Field(default=20, ge=1, le=50)
     ai_pdf_render_dpi: int = Field(default=144, ge=96, le=220)
 
+    # Durable AI job queue. Jobs are persisted in PostgreSQL and reclaimed after
+    # worker/process restarts. Concurrency limits are deliberately conservative
+    # defaults for a single Starter API instance and can be raised per deployment.
+    ai_job_worker_enabled: bool = True
+    ai_job_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    ai_job_max_concurrent_per_organization: int = Field(default=2, ge=1, le=16)
+    ai_job_max_concurrent_per_user: int = Field(default=1, ge=1, le=8)
+    ai_job_max_active_per_organization: int = Field(default=50, ge=5, le=1000)
+    ai_job_max_attempts: int = Field(default=3, ge=1, le=10)
+    ai_job_lease_seconds: int = Field(default=120, ge=30, le=900)
+    ai_job_heartbeat_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    ai_job_poll_seconds: float = Field(default=1.0, ge=0.25, le=30.0)
+    ai_job_retry_base_seconds: int = Field(default=5, ge=1, le=300)
+    ai_job_retry_max_seconds: int = Field(default=120, ge=5, le=1800)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

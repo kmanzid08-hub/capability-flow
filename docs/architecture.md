@@ -14,3 +14,10 @@ The React client is a separate Vite application. It uses route protection for na
 
 The registration use case creates its organization, first user, and owner membership in one transaction. People are archived by status instead of physically deleted.
 
+## Durable AI jobs
+
+Long-running AI work is admitted through the `ai_jobs` PostgreSQL queue instead of being owned by a browser request or an in-memory task map. The API creates or reuses one active job per tenant/entity and returns immediately. Worker slots claim jobs with database row locks, maintain renewable leases/heartbeats, and retry transient failures with bounded exponential backoff.
+
+The first production stage runs worker slots inside the API service so document analysis can continue to use the service's existing storage mount. Queue state is durable: if Render restarts the process, an expired lease is reclaimed and the source analysis resumes. The worker boundary is intentionally isolated so it can later be moved to a dedicated service once all document storage is shared/object-backed.
+
+AI admission has three limits: global worker concurrency, per-organization running concurrency, and per-user running concurrency. A separate per-organization active-queue cap prevents one tenant from consuming unbounded database/AI capacity. These limits are server-side and do not rely on frontend behavior.
