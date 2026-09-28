@@ -30,6 +30,7 @@ from app.repositories.people import PersonRepository
 from app.schemas.capability import CertificationCreate, EducationCreate, SkillCreate
 from app.schemas.experience import EmploymentCreate, ProjectCreate
 from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
+from app.services.ai_provider_health import get_provider_health
 from app.services.document_storage import create_document_storage, is_temporary_document_filename
 from app.services.document_text import (
     UnsupportedAnalysisDocument,
@@ -365,6 +366,7 @@ class ProfileAIService:
         self.people = PersonRepository(session, organization_id)
         self.storage = create_document_storage(self.settings)
         self.fallback_ai = FallbackAI(self.settings)
+        self.provider_health = get_provider_health()
 
     _PROCESSING_TIMEOUT = timedelta(minutes=60)
 
@@ -847,14 +849,34 @@ class ProfileAIService:
 
         gemini_error: Exception | None = None
         if self.settings.gemini_api_key and not force_fallback:
-            try:
-                return await self._call_gemini(person, document, content, text)
-            except (GeminiTemporarilyUnavailable, GeminiNoUsableEvidence) as exc:
-                gemini_error = exc
-                logger.warning("Gemini exhausted; trying configured fallback providers: %s", exc)
-            except Exception as exc:
-                gemini_error = exc
-                logger.warning("Gemini failed; trying configured fallback providers: %s", exc)
+            if not self.provider_health.before_call("gemini"):
+                snapshot = self.provider_health.snapshot("gemini")
+                gemini_error = GeminiTemporarilyUnavailable(
+                    "Gemini is cooling down after a recent provider-level failure"
+                )
+                logger.warning(
+                    "Skipping Gemini profile extraction while circuit is open: "
+                    "status=%s reason=%s opened_until=%s",
+                    snapshot.status,
+                    snapshot.reason,
+                    snapshot.opened_until,
+                )
+            else:
+                try:
+                    result = await self._call_gemini(person, document, content, text)
+                except (GeminiTemporarilyUnavailable, GeminiNoUsableEvidence) as exc:
+                    gemini_error = exc
+                    self.provider_health.record_failure("gemini", exc)
+                    logger.warning(
+                        "Gemini exhausted; trying configured fallback providers: %s", exc
+                    )
+                except Exception as exc:
+                    gemini_error = exc
+                    self.provider_health.record_failure("gemini", exc)
+                    logger.warning("Gemini failed; trying configured fallback providers: %s", exc)
+                else:
+                    self.provider_health.record_success("gemini")
+                    return result
 
         if not self.fallback_ai.configured:
             if isinstance(gemini_error, GeminiNoUsableEvidence):

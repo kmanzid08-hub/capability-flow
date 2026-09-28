@@ -6,6 +6,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from app.core.config import Settings
+from app.services.ai_provider_health import ProviderName, get_provider_health
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class FallbackAI:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.provider_health = get_provider_health()
         logger.info(
             "AI fallback configuration: groq=%s openrouter=%s openai=%s",
             bool(self.settings.groq_api_key),
@@ -73,9 +75,7 @@ class FallbackAI:
         mime_type: str,
         label: str,
     ) -> tuple[str, str]:
-        """Recover visible document text from an image using configured multimodal fallbacks."""
-        encoded = base64.b64encode(image_bytes).decode("ascii")
-        data_url = f"data:{mime_type};base64,{encoded}"
+        """Recover visible document text from an image using healthy multimodal providers."""
         prompt = (
             "Transcribe all readable text from this professional document image. "
             "Preserve names, dates, qualifications, employers, project names, roles, "
@@ -83,20 +83,152 @@ class FallbackAI:
             f"Image label: {label}."
         )
         errors: list[str] = []
+        providers: tuple[ProviderName, ...] = ("openrouter", "groq", "openai")
 
-        if self.settings.openrouter_api_key:
-            try:
-                model = self.settings.openrouter_model.strip() or "openrouter/free"
-                client = AsyncOpenAI(
-                    api_key=self.settings.openrouter_api_key,
-                    base_url="https://openrouter.ai/api/v1",
-                    timeout=180.0,
-                    max_retries=1,
-                    default_headers={
-                        "HTTP-Referer": "https://capability-flow.onrender.com",
-                        "X-Title": "Capability Flow",
-                    },
+        for provider in providers:
+            configured = {
+                "openrouter": bool(self.settings.openrouter_api_key),
+                "groq": bool(self.settings.groq_api_key),
+                "openai": bool(self.settings.openai_api_key),
+            }[provider]
+            if not configured:
+                continue
+
+            if not self.provider_health.before_call(provider):
+                snapshot = self.provider_health.snapshot(provider)
+                logger.warning(
+                    "Skipping AI vision provider while circuit is open: "
+                    "provider=%s status=%s reason=%s opened_until=%s",
+                    provider,
+                    snapshot.status,
+                    snapshot.reason,
+                    snapshot.opened_until,
                 )
+                errors.append(f"{provider}: circuit_open")
+                continue
+
+            try:
+                if provider == "openrouter":
+                    result = await self._extract_image_text_openrouter(
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                        label=label,
+                        prompt=prompt,
+                    )
+                elif provider == "groq":
+                    result = await self._extract_image_text_groq(
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                        label=label,
+                        prompt=prompt,
+                    )
+                else:
+                    result = await self._extract_image_text_openai(
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                        label=label,
+                        prompt=prompt,
+                    )
+            except Exception as exc:
+                snapshot = self.provider_health.record_failure(provider, exc)
+                logger.warning(
+                    "AI image text recovery provider failed: provider=%s label=%s "
+                    "health=%s reason=%s error=%s",
+                    provider,
+                    label,
+                    snapshot.status,
+                    snapshot.reason,
+                    str(exc),
+                )
+                errors.append(f"{provider}: {type(exc).__name__}")
+                continue
+
+            self.provider_health.record_success(provider)
+            return result
+
+        if not errors:
+            raise AllAIProvidersUnavailable("No multimodal fallback provider is configured")
+        raise AllAIProvidersUnavailable("; ".join(errors))
+
+    async def _extract_image_text_openrouter(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        label: str,
+        prompt: str,
+    ) -> tuple[str, str]:
+        key = self.settings.openrouter_api_key
+        if not key:
+            raise AllAIProvidersUnavailable("OpenRouter is not configured")
+
+        model = self.settings.openrouter_model.strip() or "openrouter/free"
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime_type};base64,{encoded}"
+        client = AsyncOpenAI(
+            api_key=key,
+            base_url="https://openrouter.ai/api/v1",
+            timeout=180.0,
+            max_retries=1,
+            default_headers={
+                "HTTP-Referer": "https://capability-flow.onrender.com",
+                "X-Title": "Capability Flow",
+            },
+        )
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            temperature=0.0,
+            max_tokens=3000,
+        )
+        text = self._decode_text_response(response)
+        logger.info(
+            "Image text recovery succeeded: provider=openrouter model=%s label=%s",
+            model,
+            label,
+        )
+        return text, f"openrouter:{model}:vision"
+
+    async def _extract_image_text_groq(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        label: str,
+        prompt: str,
+    ) -> tuple[str, str]:
+        key = self.settings.groq_api_key
+        if not key:
+            raise AllAIProvidersUnavailable("Groq is not configured")
+
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime_type};base64,{encoded}"
+        client = AsyncOpenAI(
+            api_key=key,
+            base_url="https://api.groq.com/openai/v1",
+            timeout=150.0,
+            max_retries=1,
+        )
+        models = await client.models.list()
+        vision_models = [
+            item.id
+            for item in models.data
+            if any(token in item.id.lower() for token in ("vision", "scout", "maverick"))
+        ]
+        if not vision_models:
+            raise ValueError("Groq exposes no multimodal model")
+
+        last_error: Exception | None = None
+        for model in vision_models[:3]:
+            try:
                 response = await client.chat.completions.create(
                     model=model,
                     messages=[
@@ -104,10 +236,7 @@ class FallbackAI:
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": data_url},
-                                },
+                                {"type": "image_url", "image_url": {"url": data_url}},
                             ],
                         }
                     ],
@@ -116,99 +245,22 @@ class FallbackAI:
                 )
                 text = self._decode_text_response(response)
                 logger.info(
-                    "Image text recovery succeeded: provider=openrouter model=%s label=%s",
+                    "Image text recovery succeeded: provider=groq model=%s label=%s",
                     model,
                     label,
                 )
-                return text, f"openrouter:{model}:vision"
+                return text, f"groq:{model}:vision"
             except Exception as exc:
-                logger.warning(
-                    "OpenRouter image text recovery failed: label=%s error=%s",
-                    label,
-                    str(exc),
-                )
-                errors.append(f"openrouter: {type(exc).__name__}")
+                last_error = exc
+                if self._is_hard_rate_limit(exc):
+                    logger.warning(
+                        "Groq vision hard quota/rate limit detected; stopping model retries"
+                    )
+                    break
 
-        if self.settings.groq_api_key:
-            try:
-                client = AsyncOpenAI(
-                    api_key=self.settings.groq_api_key,
-                    base_url="https://api.groq.com/openai/v1",
-                    timeout=150.0,
-                    max_retries=1,
-                )
-                models = await client.models.list()
-                vision_models = [
-                    item.id
-                    for item in models.data
-                    if any(token in item.id.lower() for token in ("vision", "scout", "maverick"))
-                ]
-                if not vision_models:
-                    raise ValueError("Groq exposes no multimodal model")
-                last_error: Exception | None = None
-                for model in vision_models[:3]:
-                    try:
-                        response = await client.chat.completions.create(
-                            model=model,
-                            messages=[
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": prompt},
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {"url": data_url},
-                                        },
-                                    ],
-                                }
-                            ],
-                            temperature=0.0,
-                            max_tokens=3000,
-                        )
-                        text = self._decode_text_response(response)
-                        logger.info(
-                            "Image text recovery succeeded: provider=groq model=%s label=%s",
-                            model,
-                            label,
-                        )
-                        return text, f"groq:{model}:vision"
-                    except Exception as exc:
-                        last_error = exc
-                        if self._is_hard_rate_limit(exc):
-                            logger.warning(
-                                "Groq vision hard quota/rate limit detected; stopping model retries"
-                            )
-                            break
-                if last_error is not None:
-                    raise last_error
-            except Exception as exc:
-                exc_type = type(exc).__name__
-                logger.warning(
-                    "Groq image text recovery failed: label=%s error=%s",
-                    label,
-                    str(exc),
-                )
-                errors.append(f"groq: {exc_type}")
-
-        if self.settings.openai_api_key:
-            try:
-                return await self._extract_image_text_openai(
-                    image_bytes=image_bytes,
-                    mime_type=mime_type,
-                    label=label,
-                    prompt=prompt,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "OpenAI image text recovery failed: label=%s error=%s",
-                    label,
-                    str(exc),
-                )
-                errors.append(f"openai: {type(exc).__name__}")
-
-        if not errors:
-            raise AllAIProvidersUnavailable("No multimodal fallback provider is configured")
-        raise AllAIProvidersUnavailable("; ".join(errors))
+        if last_error is not None:
+            raise last_error
+        raise ValueError("Groq vision models returned no usable response")
 
     async def _extract_image_text_openai(
         self,
@@ -276,68 +328,53 @@ class FallbackAI:
         max_tokens: int,
         mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
-        # Opportunity extraction can produce much larger JSON than profile/quick
-        # requests. Keep Groq below its strict TPM ceiling and give OpenRouter more
-        # room before falling through to the paid OpenAI safety net.
+        # Preserve the current free-first provider order. Circuit breakers only skip
+        # providers known to be cooling down.
         free_max_tokens = min(max_tokens, 3500)
-        groq_max_tokens = min(max_tokens, 2200) if mode == "opportunity" else free_max_tokens
-        openrouter_max_tokens = min(max_tokens, 4500) if mode == "opportunity" else free_max_tokens
         errors: list[str] = []
-        last_empty_profile_result: tuple[dict[str, Any], str] | None = None
-
-        providers = ["groq", "openrouter", "openai"]
+        providers: tuple[ProviderName, ...] = ("groq", "openrouter", "openai")
+        last_profile_result: tuple[dict[str, Any], str] | None = None
 
         for provider in providers:
-            if provider == "groq" and self.settings.groq_api_key:
-                try:
+            configured = {
+                "groq": bool(self.settings.groq_api_key),
+                "openrouter": bool(self.settings.openrouter_api_key),
+                "openai": bool(self.settings.openai_api_key),
+            }[provider]
+            if not configured:
+                continue
+
+            if not self.provider_health.before_call(provider):
+                snapshot = self.provider_health.snapshot(provider)
+                logger.warning(
+                    "Skipping AI provider while circuit is open: provider=%s status=%s "
+                    "reason=%s opened_until=%s",
+                    provider,
+                    snapshot.status,
+                    snapshot.reason,
+                    snapshot.opened_until,
+                )
+                errors.append(f"{provider}: circuit_open")
+                continue
+
+            try:
+                if provider == "groq":
                     result = await self._generate_groq(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
-                        max_tokens=groq_max_tokens,
+                        max_tokens=free_max_tokens,
                         mode=mode,
                     )
-                    if mode == "profile" and not self._profile_result_has_evidence(result[0]):
-                        last_empty_profile_result = result
-                        logger.warning(
-                            "AI profile fallback returned no evidence: provider=groq; "
-                            "trying the next provider"
-                        )
-                    else:
-                        return result
-                except Exception as exc:
-                    logger.warning(
-                        "AI fallback provider exhausted: provider=groq error=%s",
-                        str(exc),
-                    )
-                    errors.append(f"groq: {type(exc).__name__}")
-
-            if provider == "openrouter" and self.settings.openrouter_api_key:
-                try:
+                elif provider == "openrouter":
                     result = await self._generate_openrouter(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
-                        max_tokens=openrouter_max_tokens,
+                        max_tokens=free_max_tokens,
                         mode=mode,
                     )
-                    if mode == "profile" and not self._profile_result_has_evidence(result[0]):
-                        last_empty_profile_result = result
-                        logger.warning(
-                            "AI profile fallback returned no evidence: provider=openrouter; "
-                            "trying the next provider"
-                        )
-                    else:
-                        return result
-                except Exception as exc:
-                    logger.warning(
-                        "AI fallback provider exhausted: provider=openrouter error=%s",
-                        str(exc),
-                    )
-                    errors.append(f"openrouter: {type(exc).__name__}")
-
-            if provider == "openai" and self.settings.openai_api_key:
-                try:
+                else:
                     result = await self._generate_openai(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
@@ -345,23 +382,38 @@ class FallbackAI:
                         max_tokens=max_tokens,
                         mode=mode,
                     )
-                    if mode == "profile" and not self._profile_result_has_evidence(result[0]):
-                        last_empty_profile_result = result
-                        logger.warning("AI profile fallback returned no evidence: provider=openai")
-                    else:
-                        return result
-                except Exception as exc:
-                    logger.warning(
-                        "AI fallback provider exhausted: provider=openai error=%s",
-                        str(exc),
-                    )
-                    errors.append(f"openai: {type(exc).__name__}")
+            except Exception as exc:
+                snapshot = self.provider_health.record_failure(provider, exc)
+                logger.warning(
+                    "AI fallback provider exhausted: provider=%s health=%s reason=%s error=%s",
+                    provider,
+                    snapshot.status,
+                    snapshot.reason,
+                    str(exc),
+                )
+                errors.append(f"{provider}: {type(exc).__name__}")
+                continue
 
-        # A chunk such as a cover page may genuinely contain no profile evidence.
-        # Returning the final valid empty result lets the caller merge other chunks,
-        # while still ensuring every configured provider got a chance to inspect it.
-        if last_empty_profile_result is not None:
-            return last_empty_profile_result
+            # A valid response proves the provider itself is healthy even when a profile
+            # chunk legitimately contains no reviewable evidence (for example a cover page).
+            self.provider_health.record_success(provider)
+
+            if mode == "profile" and not self._profile_result_has_evidence(result[0]):
+                last_profile_result = result
+                logger.info(
+                    "Profile fallback returned a valid empty extraction; trying next provider: "
+                    "provider=%s",
+                    provider,
+                )
+                continue
+
+            return result
+
+        # An empty profile chunk is not a provider outage. If every reachable provider
+        # returned a valid empty result, let the caller merge it with the other chunks.
+        if last_profile_result is not None:
+            return last_profile_result
+
         if not errors:
             raise AllAIProvidersUnavailable("No fallback AI provider is configured")
         raise AllAIProvidersUnavailable("; ".join(errors))
@@ -500,7 +552,7 @@ class FallbackAI:
                 return data, f"groq:{model}"
             except Exception as exc:
                 logger.warning("Groq model failed: model=%s error=%s", model, str(exc))
-                errors.append(f"{model}: {type(exc).__name__}")
+                errors.append(f"{model}: {type(exc).__name__}: {str(exc)}")
 
                 status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
                 if status_code in (413, "413"):

@@ -12,6 +12,7 @@ from app.core.opportunity_config import get_opportunity_intelligence_settings
 from app.core.partial_dates import normalize_partial_date
 from app.schemas.opportunity import ExtractedOpportunity
 from app.services.ai_fallback import AllAIProvidersUnavailable, FallbackAI
+from app.services.ai_provider_health import get_provider_health
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ class GeminiRequirementExtractor:
         self.app_settings = get_settings()
         self.opportunity_settings = get_opportunity_intelligence_settings()
         self.fallback_ai = FallbackAI(self.app_settings)
+        self.provider_health = get_provider_health()
 
         if not self.app_settings.gemini_api_key and not self.fallback_ai.configured:
             raise RequirementExtractionError(
@@ -174,36 +176,46 @@ class GeminiRequirementExtractor:
         gemini_error: Exception | None = None
 
         if self.app_settings.gemini_api_key:
-            request_content = types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=user_prompt)],
-            )
-            try:
-                async with genai.Client(api_key=self.app_settings.gemini_api_key).aio as client:
-                    response = await client.models.generate_content(
-                        model=self.app_settings.ai_model,
-                        contents=request_content,
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_INSTRUCTIONS,
-                            response_mime_type="application/json",
-                            response_json_schema=schema,
-                            max_output_tokens=8192,
-                            temperature=0.1,
-                        ),
-                    )
-                payload = (response.text or "").strip()
-                if not payload:
-                    raise ValueError("Gemini returned an empty opportunity analysis")
-                return ExtractedOpportunity.model_validate(json.loads(payload))
-            except Exception as exc:
-                gemini_error = exc
-                logger.warning(
-                    "Gemini opportunity extraction failed: model=%s chunk=%s/%s error=%s",
-                    self.app_settings.ai_model,
-                    chunk_index,
-                    chunk_count,
-                    str(exc),
+            if not self.provider_health.before_call("gemini"):
+                snapshot = self.provider_health.snapshot("gemini")
+                gemini_error = RequirementExtractionError(
+                    "Gemini is cooling down after a recent provider-level failure"
                 )
+                logger.warning(
+                    "Skipping Gemini opportunity extraction while circuit is open: "
+                    "status=%s reason=%s opened_until=%s",
+                    snapshot.status,
+                    snapshot.reason,
+                    snapshot.opened_until,
+                )
+            else:
+                request_content = types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=user_prompt)],
+                )
+                try:
+                    async with genai.Client(api_key=self.app_settings.gemini_api_key).aio as client:
+                        response = await client.models.generate_content(
+                            model=self.app_settings.ai_model,
+                            contents=request_content,
+                            config=types.GenerateContentConfig(
+                                system_instruction=SYSTEM_INSTRUCTIONS,
+                                response_mime_type="application/json",
+                                response_json_schema=schema,
+                                max_output_tokens=8192,
+                                temperature=0.1,
+                            ),
+                        )
+                    payload = (response.text or "").strip()
+                    if not payload:
+                        raise ValueError("Gemini returned an empty opportunity analysis")
+                    result = ExtractedOpportunity.model_validate(json.loads(payload))
+                except Exception as exc:
+                    gemini_error = exc
+                    self.provider_health.record_failure("gemini", exc)
+                else:
+                    self.provider_health.record_success("gemini")
+                    return result
 
         if self.fallback_ai.configured:
             try:
@@ -212,7 +224,6 @@ class GeminiRequirementExtractor:
                     user_prompt=user_prompt,
                     schema=schema,
                     max_tokens=8192,
-                    mode="opportunity",
                 )
                 return ExtractedOpportunity.model_validate(data)
             except (AllAIProvidersUnavailable, ValidationError, ValueError, TypeError) as exc:
