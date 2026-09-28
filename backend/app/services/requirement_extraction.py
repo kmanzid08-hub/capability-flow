@@ -57,6 +57,21 @@ Separate role-level requirements from team-level constraints. Preserve mandatory
 preferred wording. Normalize common skill, certification and degree names while keeping
 a human-readable label.
 
+Team-level constraint rules:
+- Put an item in team_requirements only when the source explicitly requires something
+  about the composition of the team as a whole, multiple team members, or a collective
+  minimum (for example: at least two experts with a credential, combined coverage of
+  specified languages, or a stated team-wide geographic requirement).
+- Do not copy a named role's education, experience, certification, skill, sector or
+  geography requirement into team_requirements. It belongs only under that role.
+- Do not create a team requirement merely because the source calls the group
+  multidisciplinary, lists several key experts, or describes what the assignment team
+  will do.
+- Role headcount belongs in role.quantity. Never use team_requirements.minimum_count to
+  restate the number of named roles or experts requested.
+- If the source contains no separate, explicit cross-team constraint, return
+  team_requirements as an empty list.
+
 For a role requirement, requirement_type must be one of:
 skill, education, certification, experience, project_experience, sector, geography,
 language, availability, client_experience, document, custom.
@@ -287,6 +302,56 @@ class GeminiRequirementExtractor:
                     existing_keys.add(key)
 
     @classmethod
+    def _scope_key(cls, item: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            cls._normal_key(item.get("requirement_type")),
+            cls._normal_key(item.get("normalized_value") or item.get("label")),
+            item.get("minimum_years"),
+            cls._normal_key(item.get("minimum_degree_level")),
+            cls._normal_key(item.get("operator")),
+        )
+
+    @classmethod
+    def _remove_redundant_team_requirements(
+        cls,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        cleaned = dict(payload)
+        roles = cleaned.get("roles")
+        team_requirements = cleaned.get("team_requirements")
+        if not isinstance(roles, list) or not isinstance(team_requirements, list):
+            return cleaned
+
+        mandatory_role_keys: set[tuple[Any, ...]] = set()
+        for role in roles:
+            if not isinstance(role, dict):
+                continue
+            requirements = role.get("requirements")
+            if not isinstance(requirements, list):
+                continue
+            for requirement in requirements:
+                if not isinstance(requirement, dict):
+                    continue
+                importance = cls._normal_key(requirement.get("importance"))
+                if importance == "mandatory":
+                    mandatory_role_keys.add(cls._scope_key(requirement))
+
+        filtered: list[dict[str, Any]] = []
+        for requirement in team_requirements:
+            if not isinstance(requirement, dict):
+                continue
+            minimum_count = requirement.get("minimum_count")
+            if minimum_count in (None, 0, 1) and cls._scope_key(requirement) in mandatory_role_keys:
+                # A mandatory requirement already attached to a named role is automatically
+                # represented in the team when that role is filled. Keeping the same item as
+                # a team constraint double-counts it and can create false compliance gaps.
+                continue
+            filtered.append(requirement)
+
+        cleaned["team_requirements"] = filtered
+        return cleaned
+
+    @classmethod
     def _merge_results(
         cls,
         results: list[ExtractedOpportunity],
@@ -345,4 +410,5 @@ class GeminiRequirementExtractor:
                         team_requirements.append(requirement)
                         team_keys.add(team_key)
 
+        merged = cls._remove_redundant_team_requirements(merged)
         return ExtractedOpportunity.model_validate(merged)

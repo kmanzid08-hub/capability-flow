@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import BinaryIO
@@ -43,7 +44,15 @@ from app.services.source_ingestion import (
     OpportunitySourceIngestionService,
     SourceIngestionError,
 )
-from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer
+from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer, TeamOption
+
+
+@dataclass(frozen=True)
+class TeamConstraintAssessment:
+    fully_satisfied: bool
+    needs_verification: bool
+    confirmed_gap_labels: tuple[str, ...]
+    unverified_labels: tuple[str, ...]
 
 
 class OpportunityService:
@@ -853,52 +862,98 @@ class OpportunityService:
                     [item[1] for item in persisted],
                 )
             )
+
         await self.session.commit()
         analysis.status = AnalysisStatus.BUILDING_TEAM
         await self.session.commit()
-        options = self.optimizer.build(role_sets, self.settings.opportunity_default_team_options)
+
+        # Team score is the average role-fit score. Mandatory compliance is tracked
+        # separately so an unresolved team-level item cannot silently rewrite 100% role
+        # matches into an arbitrary 79% score.
+        options = self.optimizer.build(role_sets, None)
         team_requirements = await self.repo.team_requirements(analysis.id)
         profiles_by_person = {profile.person.id: profile for profile in profiles}
-        for index, option in enumerate(options, start=1):
-            team_constraints_ok = self._team_constraints_satisfied(
+
+        assessed_options: list[
+            tuple[
+                TeamOption,
+                TeamConstraintAssessment,
+                tuple[str, ...],
+                tuple[str, ...],
+            ]
+        ] = []
+        for option in options:
+            team_assessment = self._assess_team_constraints(
                 option.assignments, team_requirements, profiles_by_person
             )
-            team_needs_verification = any(
-                assignment.candidate.mandatory_unverified for assignment in option.assignments
+            role_failures = tuple(
+                f"Role requirements not met for {assignment.role_title}"
+                for assignment in option.assignments
+                if assignment.candidate.mandatory_failed
             )
-            effective_score = (
-                option.score
-                if team_constraints_ok and not team_needs_verification
-                else min(option.score, 79.0)
+            role_unverified = tuple(
+                f"Evidence needs verification for {assignment.role_title}"
+                for assignment in option.assignments
+                if assignment.candidate.mandatory_unverified
             )
+            assessed_options.append((option, team_assessment, role_failures, role_unverified))
+
+        # Fully confirmed teams rank before teams needing verification, which rank before
+        # teams with a confirmed mandatory gap. Role-fit score breaks ties.
+        assessed_options.sort(
+            key=lambda item: (
+                2
+                if not item[2] and not item[3] and item[1].fully_satisfied
+                else (1 if not item[2] and not item[1].confirmed_gap_labels else 0),
+                item[0].score,
+            ),
+            reverse=True,
+        )
+        assessed_options = assessed_options[: self.settings.opportunity_default_team_options]
+
+        best_team_assessment: TeamConstraintAssessment | None = None
+        for index, (
+            option,
+            team_assessment,
+            role_failures,
+            role_unverified,
+        ) in enumerate(assessed_options, start=1):
+            if index == 1:
+                best_team_assessment = team_assessment
+
+            confirmed_issues = (*role_failures, *team_assessment.confirmed_gap_labels)
+            verification_issues = (*role_unverified, *team_assessment.unverified_labels)
+
+            if confirmed_issues:
+                issue_text = "; ".join(confirmed_issues[:4])
+                explanation = (
+                    "All requested role assignments are filled, but confirmed mandatory "
+                    f"requirements are not met: {issue_text}."
+                )
+            elif verification_issues:
+                issue_text = "; ".join(verification_issues[:4])
+                explanation = (
+                    "All requested role assignments are filled. Mandatory evidence needs "
+                    f"verification: {issue_text}."
+                )
+            else:
+                explanation = (
+                    "All requested role assignments are filled and all mandatory role "
+                    "and team requirements are confirmed."
+                )
+
             team = RecommendedTeam(
                 organization_id=self.organization_id,
                 opportunity_id=opportunity.id,
                 analysis_id=analysis.id,
                 name=f"Recommended Team {index}",
-                score=effective_score,
+                score=option.score,
                 mandatory_constraints_satisfied=(
                     option.mandatory_constraints_satisfied
-                    and team_constraints_ok
-                    and not team_needs_verification
+                    and team_assessment.fully_satisfied
+                    and not role_unverified
                 ),
-                explanation=(
-                    "Assigned members satisfy role-level and team-level mandatory requirements."
-                    if (
-                        option.mandatory_constraints_satisfied
-                        and team_constraints_ok
-                        and not team_needs_verification
-                    )
-                    else (
-                        "Best available combination has no confirmed role-level failure, but "
-                        "one or more mandatory items require verification."
-                        if team_needs_verification and team_constraints_ok
-                        else (
-                            "Best available combination includes at least one confirmed mandatory "
-                            "role or team-level gap."
-                        )
-                    )
-                ),
+                explanation=explanation,
             )
             self.repo.add(team)
             await self.session.flush()
@@ -924,6 +979,7 @@ class OpportunityService:
                         assignment_score=assignment.candidate.score,
                     )
                 )
+
         for role in roles:
             matches = await self.repo.candidate_matches(role.id)
             best: CandidateMatch | None = matches[0] if matches else None
@@ -962,20 +1018,61 @@ class OpportunityService:
                         ),
                     )
                 )
+
+        if best_team_assessment is not None:
+            for label in best_team_assessment.confirmed_gap_labels:
+                self.repo.add(
+                    CapabilityGap(
+                        organization_id=self.organization_id,
+                        opportunity_id=opportunity.id,
+                        analysis_id=analysis.id,
+                        role_id=None,
+                        severity="critical",
+                        label=f"Team requirement not met: {label}",
+                        best_candidate_person_id=None,
+                        best_candidate_score=None,
+                        recommendation=(
+                            "Review the explicit team-level requirement and adjust the "
+                            "recommended composition or source evidence."
+                        ),
+                    )
+                )
+            for label in best_team_assessment.unverified_labels:
+                self.repo.add(
+                    CapabilityGap(
+                        organization_id=self.organization_id,
+                        opportunity_id=opportunity.id,
+                        analysis_id=analysis.id,
+                        role_id=None,
+                        severity="warning",
+                        label=f"Team requirement needs verification: {label}",
+                        best_candidate_person_id=None,
+                        best_candidate_score=None,
+                        recommendation=(
+                            "This is not a confirmed capability gap. Review the available "
+                            "evidence for the team-level requirement."
+                        ),
+                    )
+                )
+
         analysis.readiness_score = (
             round(sum(top_scores) / len(top_scores), 2) if top_scores else 0.0
         )
         await self.session.commit()
 
-    def _team_constraints_satisfied(
+    def _assess_team_constraints(
         self,
         assignments: list[TeamAssignment],
         requirements: list[TeamRequirement],
         profiles_by_person: dict[uuid.UUID, PersonProfile],
-    ) -> bool:
+    ) -> TeamConstraintAssessment:
+        confirmed_gaps: list[str] = []
+        unverified: list[str] = []
+
         for requirement in requirements:
             if requirement.importance != RequirementImportance.MANDATORY:
                 continue
+
             proxy = SimpleNamespace(
                 id=uuid.uuid4(),
                 requirement_type=requirement.requirement_type,
@@ -990,20 +1087,38 @@ class OpportunityService:
                 weight=requirement.weight,
                 evidence_required=False,
             )
+
             matched_count = 0
+            unverified_count = 0
             for assignment in assignments:
                 profile = profiles_by_person.get(assignment.candidate.person.id)
                 if profile is None:
+                    unverified_count += 1
                     continue
+
                 result = self.matching.evaluate_requirement(profile, proxy)
-                if result.status == MatchStatus.MATCHED or (
-                    result.status == MatchStatus.PARTIAL and result.score >= 0.75
-                ):
+                if result.status == MatchStatus.MATCHED:
                     matched_count += 1
-            needed = requirement.minimum_count or 1
-            if matched_count < needed:
-                return False
-        return True
+                elif result.status == MatchStatus.UNVERIFIED:
+                    unverified_count += 1
+
+            needed = max(requirement.minimum_count or 1, 1)
+            if matched_count >= needed:
+                continue
+
+            # Unknown evidence is not proof of non-compliance. Only call this a
+            # confirmed gap when even the unverified members could not satisfy the count.
+            if matched_count + unverified_count >= needed:
+                unverified.append(requirement.label)
+            else:
+                confirmed_gaps.append(requirement.label)
+
+        return TeamConstraintAssessment(
+            fully_satisfied=not confirmed_gaps and not unverified,
+            needs_verification=bool(unverified),
+            confirmed_gap_labels=tuple(confirmed_gaps),
+            unverified_labels=tuple(unverified),
+        )
 
     async def analysis(self, opportunity_id: uuid.UUID) -> OpportunityAnalysis:
         await self.get(opportunity_id)

@@ -27,7 +27,11 @@ class TeamOption:
 
 
 class TeamOptimizer:
-    def build(self, role_sets: list[RoleCandidateSet], max_options: int = 3) -> list[TeamOption]:
+    def build(
+        self,
+        role_sets: list[RoleCandidateSet],
+        max_options: int | None = 3,
+    ) -> list[TeamOption]:
         slots: list[tuple[object, str, list[CandidateEvaluation]]] = []
         for role_set in role_sets:
             for _ in range(role_set.quantity):
@@ -51,11 +55,9 @@ class TeamOptimizer:
             ]
             score = sum(item.candidate.score for item in assignments) / len(assignments)
             mandatory_ok = all(not item.candidate.mandatory_failed for item in assignments)
-            if not mandatory_ok:
-                score = min(score, 79.0)
             options.append(TeamOption(round(score, 2), assignments, mandatory_ok))
         options.sort(
             key=lambda item: (item.mandatory_constraints_satisfied, item.score),
             reverse=True,
         )
-        return options[:max_options]
+        return options if max_options is None else options[:max_options]

@@ -27,6 +27,24 @@ import type {
 import { StatusBadge } from "../../components/StatusBadge";
 import { qk } from "../../lib/queryKeys";
 import { EmptyState } from "./display";
+function teamComplianceState(
+  team: RecommendedTeam,
+): "satisfied" | "verification" | "gap" {
+  if (team.mandatory_constraints_satisfied) {
+    return "satisfied";
+  }
+
+  const explanation = (team.explanation ?? "").toLowerCase();
+  if (
+    explanation.includes("needs verification") ||
+    explanation.includes("require verification")
+  ) {
+    return "verification";
+  }
+
+  return "gap";
+}
+
 export function RecommendedTeams({
   opportunityId,
   selectedTeamId,
@@ -124,7 +142,9 @@ export function RecommendedTeams({
 
                   {index === 0 && (
                     <span className="rounded-full bg-mint px-2.5 py-1 text-xs font-semibold text-evergreen">
-                      Best team
+                      {team.mandatory_constraints_satisfied
+                        ? "Best team"
+                        : "Best available"}
                     </span>
                   )}
 
@@ -147,7 +167,7 @@ export function RecommendedTeams({
                   %
                 </p>
                 <p className="text-xs text-slate-400">
-                  team score
+                  average role fit
                 </p>
               </div>
             </div>
@@ -209,26 +229,34 @@ export function RecommendedTeams({
             )}
 
             <div className="mt-5 flex items-center gap-2 text-sm">
-              {team.mandatory_constraints_satisfied ? (
+              {teamComplianceState(team) === "satisfied" ? (
                 <>
                   <BadgeCheck
                     size={17}
                     className="text-emerald-600"
                   />
                   <span className="font-semibold text-emerald-700">
-                    Mandatory team constraints
-                    satisfied
+                    Mandatory requirements confirmed
                   </span>
                 </>
-              ) : (
+              ) : teamComplianceState(team) === "verification" ? (
                 <>
                   <AlertTriangle
                     size={17}
                     className="text-amber-600"
                   />
                   <span className="font-semibold text-amber-700">
-                    Team contains one or more
-                    mandatory gaps
+                    Mandatory evidence needs verification
+                  </span>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle
+                    size={17}
+                    className="text-red-600"
+                  />
+                  <span className="font-semibold text-red-700">
+                    Confirmed mandatory requirement gap
                   </span>
                 </>
               )}
