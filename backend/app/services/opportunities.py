@@ -805,7 +805,9 @@ class OpportunityService:
         best_unverified_by_role: dict[uuid.UUID, bool] = {}
         for role in roles:
             requirements = await self.repo.requirements(role.id)
-            evaluations = [self.matching.evaluate(profile, requirements) for profile in profiles]
+            evaluations = [
+                self.matching.evaluate(profile, requirements, role.title) for profile in profiles
+            ]
             evaluations.sort(
                 key=lambda item: (
                     not item.mandatory_failed,
@@ -981,7 +983,7 @@ class OpportunityService:
                         role_id=assignment.role_id,
                         person_id=assignment.candidate.person.id,
                         candidate_match_id=candidate_match.id,
-                        assignment_score=assignment.candidate.score,
+                        assignment_score=float(candidate_match.score),
                     )
                 )
 

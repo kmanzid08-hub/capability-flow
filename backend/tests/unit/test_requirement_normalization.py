@@ -43,7 +43,7 @@ def test_experience_backfill_does_not_reduce_to_total_career_years() -> None:
     )
     assert value is None
     assert values == ["impact evaluations", "economic analyses"]
-    assert operator == "one_of"
+    assert operator == "all_of"
 
 
 def test_existing_machine_targets_are_never_overwritten() -> None:
@@ -66,3 +66,15 @@ def test_nonsemantic_requirement_types_are_not_guessed_from_labels() -> None:
     assert value is None
     assert values is None
     assert operator == "match"
+
+
+def test_experience_and_is_preserved_as_all_of() -> None:
+    value, values, operator = normalize_requirement_fields(
+        _req(
+            "experience",
+            "Minimum 10 years leading impact evaluations and economic analyses",
+        )
+    )
+    assert value is None
+    assert values == ["impact evaluations", "economic analyses"]
+    assert operator == "all_of"

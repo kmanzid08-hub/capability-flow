@@ -104,6 +104,11 @@ Precision rules for matching:
   particular sector, technical area, client category, or type of assignment. Preserve that
   subject as normalized_value/values so matching evaluates relevant years rather than total
   career length.
+- When a requirement explicitly requires multiple experience dimensions together (for example
+  "survey sampling, econometric analysis and data management"), keep the dimensions in values
+  and use operator='all_of'. Use operator='one_of' only for genuine alternatives.
+- Do not broaden a specific discipline into its parent field: plain Economics is not equivalent
+  to Agricultural Economics, and generic Agriculture is not equivalent to Animal Science.
 - For project experience, capture the actual project domain and minimum project count/duration.
 - For certifications, preserve the specific credential or explicit alternatives. Do not treat
   unrelated professional certificates as equivalent.

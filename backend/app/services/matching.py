@@ -1,37 +1,28 @@
-import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
-from difflib import SequenceMatcher
 from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.partial_dates import months_between_partial, partial_date_is_expired
+from app.core.partial_dates import partial_date_is_expired
 from app.models.capability import PersonCertification, PersonEducation, PersonSkill
 from app.models.document import PersonDocument
 from app.models.enums import ProfileStatus
 from app.models.experience import EmploymentExperience, ProjectExperience
 from app.models.opportunity_enums import MatchStatus, RequirementImportance, RequirementType
 from app.models.person import Person
-
-logger = logging.getLogger(__name__)
-
-
-def _safe_months_between_partial(start_date: str | None, end_date: str | None) -> int:
-    if not start_date or not end_date:
-        return 0
-    try:
-        return months_between_partial(start_date, end_date)
-    except Exception:
-        logger.warning(
-            "Ignoring invalid experience dates during matching: start=%s end=%s",
-            start_date,
-            end_date,
-        )
-        return 0
+from app.services.matching_semantics import (
+    TextEvidence,
+    best_strength,
+    has_leadership_signal,
+    normalize_text,
+    requirement_needs_leadership,
+    role_relevance,
+    semantic_strength,
+    unique_duration_months,
+)
 
 
 class RequirementLike(Protocol):
@@ -103,102 +94,11 @@ class PersonProfile:
 
 
 def normalize(value: str | None) -> str:
-    return " ".join((value or "").lower().replace("-", " ").replace("_", " ").split())
-
-
-def _token_stem(token: str) -> str:
-    """Small domain-safe stemmer used only for qualification terminology."""
-    token = token.strip().lower()
-    canonical_prefixes = {
-        "agricultur": "agriculture",
-        "chem": "chemistry",
-        "financ": "finance",
-        "econom": "economics",
-        "account": "accounting",
-        "environment": "environment",
-        "statist": "statistics",
-        "engineer": "engineering",
-        "biolog": "biology",
-        "geolog": "geology",
-    }
-    for prefix, canonical in canonical_prefixes.items():
-        if token.startswith(prefix):
-            return canonical
-    for suffix in ("ies", "ology", "ation", "ment", "ing", "al", "ic", "s"):
-        if len(token) > len(suffix) + 4 and token.endswith(suffix):
-            return token[: -len(suffix)]
-    return token
-
-
-def _meaningful_tokens(value: str | None) -> set[str]:
-    stopwords = {
-        "and",
-        "or",
-        "the",
-        "of",
-        "in",
-        "for",
-        "with",
-        "to",
-        "a",
-        "an",
-        "degree",
-        "master",
-        "masters",
-        "bachelor",
-        "bachelors",
-        "qualification",
-        "field",
-        "fields",
-        "area",
-        "areas",
-        "relevant",
-        "related",
-        "equivalent",
-        "experience",
-        "years",
-        "year",
-        "minimum",
-        "professional",
-    }
-    return {
-        _token_stem(token)
-        for token in normalize(value).split()
-        if len(token) > 2 and token not in stopwords
-    }
+    return normalize_text(value)
 
 
 def match_strength(haystack: str | None, needle: str | None) -> float:
-    """Return a conservative 0..1 terminology match strength.
-
-    Exact containment is strongest. Token/stem overlap catches genuine variants such as
-    ``agriculture``/``agricultural`` or reordered phrases without treating unrelated
-    qualifications at the same degree level as relevant.
-    """
-    h = normalize(haystack)
-    n = normalize(needle)
-    if not h or not n:
-        return 0.0
-    if h == n:
-        return 1.0
-    if n in h or h in n:
-        return 0.98
-
-    h_tokens = _meaningful_tokens(h)
-    n_tokens = _meaningful_tokens(n)
-    if not h_tokens or not n_tokens:
-        return 0.0
-
-    overlap = len(h_tokens & n_tokens) / len(n_tokens)
-    if overlap >= 1.0:
-        return 0.95
-    if overlap >= 0.67:
-        return 0.88
-    if overlap >= 0.5 and len(n_tokens) >= 2:
-        return 0.78
-
-    ratio = SequenceMatcher(None, h, n).ratio()
-    return 0.75 if ratio >= 0.86 else 0.0
+    return semantic_strength(haystack, needle)
 
 
 def contains(haystack: str | None, needle: str | None) -> bool:
@@ -269,6 +169,7 @@ class MatchingEngine:
         self,
         profile: PersonProfile,
         requirements: Sequence[RequirementLike],
+        role_title: str | None = None,
     ) -> CandidateEvaluation:
         results = {req.id: self.evaluate_requirement(profile, req) for req in requirements}
         weighted_total = 0.0
@@ -324,6 +225,18 @@ class MatchingEngine:
             raw_score = base_score * qualification_factor if mandatory_failed else base_score
         else:
             raw_score = base_score
+
+        # Role relevance is deliberately modest and evidence-backed. It helps distinguish
+        # genuinely close candidates without substituting a job title for mandatory evidence.
+        if role_title:
+            relevance = role_relevance(
+                role_title,
+                professional_title=profile.person.professional_title,
+                summary=profile.person.summary,
+                employment_titles=(item.job_title for item in profile.employment),
+                project_roles=(item.role for item in profile.projects),
+            )
+            raw_score = (raw_score * 0.92) + (relevance * 100.0 * 0.08)
 
         return CandidateEvaluation(
             person=profile.person,
@@ -493,8 +406,8 @@ class MatchingEngine:
                     min(0.78, strength),
                     evidence,
                     (
-                        "Degree level and field match, but required documentary evidence "
-                        + "is not linked."
+                        "Degree level and field match, but required documentary "
+                        "evidence is not linked."
                     ),
                 )
             if strength >= 0.88:
@@ -508,10 +421,7 @@ class MatchingEngine:
                 MatchStatus.PARTIAL,
                 strength,
                 evidence,
-                (
-                    "Education is substantively related, but the discipline wording "
-                    + "is not an exact match."
-                ),
+                "Education is related, but the discipline is not a confirmed equivalent.",
             )
 
         item = max(level_eligible, key=lambda degree: DEGREE_RANK.get(degree.degree_level.value, 0))
@@ -522,8 +432,6 @@ class MatchingEngine:
                 item.field_of_study,
             )
         ]
-        # Same degree level alone is not a qualification match. Keep the person visible for
-        # review, but give only small credit so unrelated master's degrees cannot rank highly.
         return RequirementEvaluation(
             MatchStatus.MISSING
             if req.importance == RequirementImportance.MANDATORY
@@ -532,7 +440,7 @@ class MatchingEngine:
             evidence,
             (
                 "Required degree level is present, but the requested discipline is "
-                + "not supported by the education record."
+                "not supported by the education record."
             ),
         )
 
@@ -591,63 +499,111 @@ class MatchingEngine:
 
     def _experience(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
         targets = self._targets(req)
+        operator = normalize(req.operator or "match")
 
-        def employment_strength(item: EmploymentExperience) -> float:
-            if not targets:
-                return 1.0
-            texts = [
-                item.job_title,
-                item.industry,
-                item.description,
-                item.responsibilities,
-                item.achievements,
-                item.employer_name,
-            ]
-            return max(
-                (match_strength(text, target) for text in texts for target in targets),
-                default=0.0,
+        evidence_records: list[TextEvidence] = []
+        for employment_item in profile.employment:
+            evidence_records.append(
+                TextEvidence(
+                    source="employment",
+                    label=employment_item.job_title,
+                    detail=employment_item.employer_name,
+                    texts=(
+                        employment_item.job_title,
+                        employment_item.industry,
+                        employment_item.description,
+                        employment_item.responsibilities,
+                        employment_item.achievements,
+                    ),
+                    start_date=employment_item.start_date,
+                    end_date=employment_item.end_date,
+                )
+            )
+        for project_item in profile.projects:
+            evidence_records.append(
+                TextEvidence(
+                    source="project",
+                    label=project_item.project_name,
+                    detail=project_item.role,
+                    texts=(
+                        project_item.role,
+                        project_item.project_name,
+                        project_item.sector,
+                        project_item.description,
+                        project_item.responsibilities,
+                        project_item.outcomes,
+                        project_item.skills_summary,
+                    ),
+                    start_date=project_item.start_date,
+                    end_date=project_item.end_date,
+                )
             )
 
-        relevant = [
-            (item, employment_strength(item))
-            for item in profile.employment
-            if employment_strength(item) >= 0.75
-        ]
-        months = sum(
-            _safe_months_between_partial(
-                item.start_date,
-                item.end_date or date.today().isoformat(),
+        if not targets:
+            months = unique_duration_months(
+                (record.start_date, record.end_date) for record in evidence_records
             )
-            for item, _ in relevant
-        )
-        years = months / 12
-        minimum = req.minimum_years or 0.0
-
-        if relevant and (not minimum or years >= minimum):
-            strength = max(score for _, score in relevant)
+            years = months / 12
+            minimum = req.minimum_years or 0.0
+            if evidence_records and (not minimum or years >= minimum):
+                return RequirementEvaluation(
+                    MatchStatus.MATCHED,
+                    1.0,
+                    [
+                        Evidence(record.source, record.label, record.detail)
+                        for record in evidence_records[:5]
+                    ],
+                    f"Recorded professional history is {years:.1f} non-overlapping years.",
+                )
+            score = min(0.85, years / minimum) if minimum else 0.0
             return RequirementEvaluation(
-                MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
-                min(1.0, strength + 0.05),
-                [
-                    Evidence("employment", item.job_title, item.employer_name)
-                    for item, _ in relevant[:5]
-                ],
-                f"Found {years:.1f} years of experience relevant to the requested area.",
-            )
-
-        if relevant and minimum:
-            score = min(0.85, years / minimum) if minimum else 1.0
-            return RequirementEvaluation(
-                MatchStatus.PARTIAL,
+                MatchStatus.PARTIAL if years else MatchStatus.MISSING,
                 score,
                 [
-                    Evidence("employment", item.job_title, item.employer_name)
-                    for item, _ in relevant[:5]
+                    Evidence(record.source, record.label, record.detail)
+                    for record in evidence_records[:5]
                 ],
-                f"Relevant experience is {years:.1f} years vs {minimum:g} required.",
+                f"Recorded professional history is {years:.1f} years vs {minimum:g} required.",
             )
 
-        if profile.employment and targets:
+        strengths_by_target: dict[str, list[tuple[TextEvidence, float]]] = {}
+        for target in targets:
+            scored = [(record, best_strength(record.texts, target)) for record in evidence_records]
+            strengths_by_target[target] = [pair for pair in scored if pair[1] >= 0.75]
+
+        required_targets = targets if operator == "all_of" else []
+        if required_targets and any(not strengths_by_target[target] for target in required_targets):
+            near = max(
+                (
+                    best_strength(record.texts, target)
+                    for record in evidence_records
+                    for target in targets
+                ),
+                default=0.0,
+            )
+            return RequirementEvaluation(
+                MatchStatus.UNVERIFIED if near >= 0.55 else MatchStatus.MISSING,
+                0.45 if near >= 0.55 else 0.1,
+                [],
+                "Professional evidence does not confirm every required experience dimension.",
+            )
+
+        matched_pairs: list[tuple[TextEvidence, float]] = []
+        if operator == "all_of":
+            for target in targets:
+                matched_pairs.extend(strengths_by_target[target])
+        else:
+            for target in targets:
+                matched_pairs.extend(strengths_by_target[target])
+        dedup: dict[tuple[str, str, str | None], tuple[TextEvidence, float]] = {}
+        for record, strength in matched_pairs:
+            key = (record.source, record.label, record.start_date)
+            previous = dedup.get(key)
+            if previous is None or strength > previous[1]:
+                dedup[key] = (record, strength)
+        matches = sorted(dedup.values(), key=lambda pair: pair[1], reverse=True)
+
+        if not matches:
             return RequirementEvaluation(
                 MatchStatus.MISSING
                 if req.importance == RequirementImportance.MANDATORY
@@ -655,28 +611,59 @@ class MatchingEngine:
                 0.1 if req.importance == RequirementImportance.MANDATORY else 0.3,
                 [],
                 (
-                    "Professional history exists, but it does not evidence the "
-                    + "requested experience area."
+                    "Professional history exists, but it does not evidence the requested "
+                    "experience area."
                 ),
             )
 
-        total_months = sum(
-            months_between_partial(item.start_date, item.end_date or date.today().isoformat())
-            for item in profile.employment
-        )
-        total_years = total_months / 12
-        if not targets and (not minimum or total_years >= minimum):
+        leadership_required = requirement_needs_leadership(req.label)
+        if leadership_required and not has_leadership_signal(
+            text for record, _ in matches for text in record.texts
+        ):
             return RequirementEvaluation(
-                MatchStatus.MATCHED,
-                1.0,
-                [Evidence("employment", f"{total_years:.1f} years total professional history")],
-                "Recorded professional history satisfies the general experience requirement.",
+                MatchStatus.PARTIAL,
+                0.62,
+                [Evidence(record.source, record.label, record.detail) for record, _ in matches[:5]],
+                "Relevant experience exists, but leadership of that work is not confirmed.",
             )
+
+        months = unique_duration_months(
+            (record.start_date, record.end_date) for record, _ in matches
+        )
+        years = months / 12
+        minimum = req.minimum_years or 0.0
+        undated = [record for record, _ in matches if not record.start_date]
+        strength = max(score for _, score in matches)
+        evidence = [
+            Evidence(record.source, record.label, record.detail) for record, _ in matches[:5]
+        ]
+
+        if minimum and years < minimum:
+            if undated:
+                return RequirementEvaluation(
+                    MatchStatus.UNVERIFIED,
+                    min(0.72, max(0.5, years / minimum if minimum else 0.5)),
+                    evidence,
+                    (
+                        f"Verified non-overlapping relevant experience is {years:.1f} years, "
+                        "and additional relevant project evidence has no recorded dates."
+                    ),
+                )
+            return RequirementEvaluation(
+                MatchStatus.PARTIAL,
+                min(0.85, years / minimum),
+                evidence,
+                (
+                    f"Relevant non-overlapping experience is {years:.1f} years "
+                    f"vs {minimum:g} required."
+                ),
+            )
+
         return RequirementEvaluation(
-            MatchStatus.MISSING,
-            0.0,
-            [],
-            "No qualifying experience evidence was found.",
+            MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
+            min(1.0, strength + 0.05),
+            evidence,
+            f"Found {years:.1f} non-overlapping years of relevant experience.",
         )
 
     def _project_experience(
@@ -685,70 +672,86 @@ class MatchingEngine:
         req: RequirementLike,
     ) -> RequirementEvaluation:
         targets = self._targets(req)
+        operator = normalize(req.operator or "match")
+        records = [
+            TextEvidence(
+                source="project",
+                label=item.project_name,
+                detail=item.role,
+                texts=(
+                    item.project_name,
+                    item.role,
+                    item.description,
+                    item.sector,
+                    item.skills_summary,
+                    item.responsibilities,
+                    item.outcomes,
+                    item.client_name,
+                ),
+                start_date=item.start_date,
+                end_date=item.end_date,
+            )
+            for item in profile.projects
+        ]
 
-        def project_strength(item: ProjectExperience) -> float:
-            if not targets:
-                return 1.0
-            texts = [
-                item.project_name,
-                item.description,
-                item.sector,
-                item.skills_summary,
-                item.responsibilities,
-                item.outcomes,
-                item.client_name,
+        scored_by_target = {
+            target: [
+                (record, best_strength(record.texts, target))
+                for record in records
+                if best_strength(record.texts, target) >= 0.75
             ]
-            return max(
-                (match_strength(text, target) for text in texts for target in targets),
-                default=0.0,
+            for target in targets
+        }
+        if (
+            operator == "all_of"
+            and targets
+            and any(not scored_by_target[target] for target in targets)
+        ):
+            return RequirementEvaluation(
+                MatchStatus.MISSING,
+                0.1,
+                [],
+                "Project evidence does not confirm every required project dimension.",
             )
 
-        scored = [(item, project_strength(item)) for item in profile.projects]
-        matches = [(item, strength) for item, strength in scored if strength >= 0.75]
+        pairs = (
+            [pair for target in targets for pair in scored_by_target[target]]
+            if targets
+            else [(record, 1.0) for record in records]
+        )
+        dedup: dict[tuple[str, str | None], tuple[TextEvidence, float]] = {}
+        for record, strength in pairs:
+            key = (record.label, record.start_date)
+            if key not in dedup or strength > dedup[key][1]:
+                dedup[key] = (record, strength)
+        matches = sorted(dedup.values(), key=lambda pair: pair[1], reverse=True)
 
         if req.minimum_count and len(matches) < req.minimum_count:
             score = min(0.85, len(matches) / req.minimum_count)
             return RequirementEvaluation(
                 MatchStatus.PARTIAL if matches else MatchStatus.MISSING,
                 score,
-                [Evidence("project", item.project_name, item.sector) for item, _ in matches[:5]],
+                [Evidence(record.source, record.label, record.detail) for record, _ in matches[:5]],
                 f"Found {len(matches)} relevant projects vs {req.minimum_count} required.",
             )
 
         if req.minimum_years:
-            dated_matches = [
-                (item, strength)
-                for item, strength in matches
-                if item.start_date is not None
-            ]
-            undated_matches = [
-                (item, strength)
-                for item, strength in matches
-                if item.start_date is None
-            ]
-            years = (
-                sum(
-                    months_between_partial(
-                        item.start_date,
-                        item.end_date or date.today().isoformat(),
-                    )
-                    for item, _ in dated_matches
-                    if item.start_date is not None
-                )
-                / 12
+            months = unique_duration_months(
+                (record.start_date, record.end_date) for record, _ in matches
             )
-            if years < req.minimum_years and undated_matches:
+            years = months / 12
+            undated = [record for record, _ in matches if not record.start_date]
+            if years < req.minimum_years and undated:
                 return RequirementEvaluation(
                     MatchStatus.UNVERIFIED,
-                    0.5,
+                    0.55,
                     [
-                        Evidence("project", item.project_name, item.sector)
-                        for item, _ in matches[:5]
+                        Evidence(record.source, record.label, record.detail)
+                        for record, _ in matches[:5]
                     ],
                     (
-                        f"Verified relevant project duration is {years:.1f} years, but "
-                        "some relevant projects have no recorded dates, so the required "
-                        f"{req.minimum_years:g} years cannot be verified."
+                        f"Verified non-overlapping relevant project duration is {years:.1f} years, "
+                        "but some relevant projects have no recorded dates."
                     ),
                 )
             if years < req.minimum_years:
@@ -757,12 +760,12 @@ class MatchingEngine:
                     MatchStatus.PARTIAL if matches else MatchStatus.MISSING,
                     score,
                     [
-                        Evidence("project", item.project_name, item.sector)
-                        for item, _ in matches[:5]
+                        Evidence(record.source, record.label, record.detail)
+                        for record, _ in matches[:5]
                     ],
                     (
-                        f"Verified relevant project duration is {years:.1f} years vs "
-                        + f"{req.minimum_years:g} required."
+                        f"Relevant project duration is {years:.1f} years "
+                        f"vs {req.minimum_years:g} required."
                     ),
                 )
 
@@ -771,7 +774,7 @@ class MatchingEngine:
             return RequirementEvaluation(
                 MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
                 min(1.0, strength + 0.05),
-                [Evidence("project", item.project_name, item.sector) for item, _ in matches[:5]],
+                [Evidence(record.source, record.label, record.detail) for record, _ in matches[:5]],
                 "Relevant project evidence closely satisfies the requirement.",
             )
 

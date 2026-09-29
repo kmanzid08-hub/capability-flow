@@ -93,6 +93,17 @@ def _experience_targets(label: str) -> list[str]:
     return _dedupe(expanded)
 
 
+def _infer_operator(label: str, targets: list[str], current: str) -> str:
+    if len(targets) <= 1:
+        return "match"
+    cleaned_label = _RELATED_SUFFIX_RE.sub("", label).lower()
+    if re.search(r"\bor\b", cleaned_label):
+        return "one_of"
+    if re.search(r"\band\b", cleaned_label):
+        return "all_of"
+    return current if current in {"one_of", "all_of"} else "one_of"
+
+
 def normalize_requirement_fields(requirement: Any) -> tuple[str | None, list[str] | None, str]:
     """Backfill missing semantic targets without overriding explicit AI extraction."""
 
@@ -100,7 +111,16 @@ def normalize_requirement_fields(requirement: Any) -> tuple[str | None, list[str
     existing_values = list(getattr(requirement, "values", None) or [])
     operator = str(getattr(requirement, "operator", "match") or "match")
     if existing_value or existing_values:
-        return existing_value, existing_values or None, operator
+        explicit_targets = ([existing_value] if existing_value else []) + existing_values
+        return (
+            existing_value,
+            existing_values or None,
+            _infer_operator(
+                str(getattr(requirement, "label", "") or ""),
+                explicit_targets,
+                operator,
+            ),
+        )
 
     label = str(getattr(requirement, "label", "") or "").strip()
     requirement_type = getattr(requirement, "requirement_type", None)
@@ -117,4 +137,4 @@ def normalize_requirement_fields(requirement: Any) -> tuple[str | None, list[str
         return None, None, operator
     if len(targets) == 1:
         return targets[0], None, "match"
-    return None, targets, "one_of"
+    return None, targets, _infer_operator(label, targets, operator)
