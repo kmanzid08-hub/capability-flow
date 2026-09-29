@@ -93,6 +93,10 @@ Precision rules for matching:
 - For education, separate degree level from discipline. Example: "Master's in Agriculture or
   Chemistry" means minimum_degree_level='master' and discipline alternatives such as
   agriculture and chemistry. A Master's in Economics or Finance is not an education match.
+- Machine matching fields are mandatory whenever the human-readable requirement is specific:
+  never leave normalized_value and values both empty for an education discipline, experience
+  area, project domain, certification, skill, sector, geography, or client type. If there are
+  multiple explicit alternatives, put each alternative in values.
 - Split explicit alternatives into values and use operator='one_of'. Preserve phrases such as
   "or related field", "equivalent", or "relevant discipline" in the label/notes, but do not
   invent related disciplines that the source does not support.

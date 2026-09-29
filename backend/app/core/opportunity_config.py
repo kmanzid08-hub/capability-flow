@@ -43,7 +43,7 @@ class OpportunityIntelligenceSettings(BaseSettings):
     )
     opportunity_source_storage_root: Path = Path("storage/opportunity_sources")
     opportunity_max_candidates_per_role: int = Field(
-        default=50,
+        default=200,
         ge=5,
         le=500,
     )

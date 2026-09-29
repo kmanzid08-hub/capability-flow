@@ -33,13 +33,14 @@ from app.models.opportunity_enums import (
 )
 from app.repositories.opportunities import OpportunityRepository
 from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, OpportunityUpdate
-from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
+from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile, match_strength
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
 from app.services.requirement_extraction import (
     GeminiRequirementExtractor,
     RequirementExtractionError,
 )
+from app.services.requirement_normalization import normalize_requirement_fields
 from app.services.source_ingestion import (
     OpportunitySourceIngestionService,
     SourceIngestionError,
@@ -752,6 +753,9 @@ class OpportunityService:
             self.repo.add(role)
             await self.session.flush()
             for requirement_data in role_data.requirements:
+                normalized_value, normalized_values, normalized_operator = (
+                    normalize_requirement_fields(requirement_data)
+                )
                 self.repo.add(
                     OpportunityRequirement(
                         organization_id=self.organization_id,
@@ -761,12 +765,12 @@ class OpportunityService:
                         requirement_type=requirement_data.requirement_type,
                         importance=requirement_data.importance,
                         label=requirement_data.label,
-                        normalized_value=requirement_data.normalized_value,
-                        values_json=requirement_data.values,
+                        normalized_value=normalized_value,
+                        values_json=normalized_values,
                         minimum_years=requirement_data.minimum_years,
                         minimum_count=requirement_data.minimum_count,
                         minimum_degree_level=requirement_data.minimum_degree_level,
-                        operator=requirement_data.operator,
+                        operator=normalized_operator,
                         weight=requirement_data.weight,
                         evidence_required=requirement_data.evidence_required,
                         notes=requirement_data.notes,
@@ -807,6 +811,7 @@ class OpportunityService:
                     not item.mandatory_failed,
                     not item.mandatory_unverified,
                     item.score,
+                    match_strength(item.person.professional_title, role.title),
                 ),
                 reverse=True,
             )
