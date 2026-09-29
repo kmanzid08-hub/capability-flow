@@ -80,6 +80,7 @@ class CandidateEvaluation:
     mandatory_failed: bool
     mandatory_unverified: bool
     requirement_results: dict[uuid.UUID, RequirementEvaluation]
+    role_relevance_score: float = 0.0
 
 
 @dataclass
@@ -226,8 +227,9 @@ class MatchingEngine:
         else:
             raw_score = base_score
 
-        # Role relevance is deliberately modest and evidence-backed. It helps distinguish
-        # genuinely close candidates without substituting a job title for mandatory evidence.
+        # Role relevance is bounded and evidence-backed. It differentiates genuinely close
+        # candidates without allowing a job title to substitute for mandatory qualifications.
+        relevance = 0.0
         if role_title:
             relevance = role_relevance(
                 role_title,
@@ -235,8 +237,12 @@ class MatchingEngine:
                 summary=profile.person.summary,
                 employment_titles=(item.job_title for item in profile.employment),
                 project_roles=(item.role for item in profile.projects),
+                education_fields=(
+                    item.field_of_study or item.degree_name or "" for item in profile.education
+                ),
+                skill_names=(item.name for item in profile.skills),
             )
-            raw_score = (raw_score * 0.92) + (relevance * 100.0 * 0.08)
+            raw_score = (raw_score * 0.88) + (relevance * 100.0 * 0.12)
 
         return CandidateEvaluation(
             person=profile.person,
@@ -246,6 +252,7 @@ class MatchingEngine:
             mandatory_failed=mandatory_failed,
             mandatory_unverified=mandatory_unverified,
             requirement_results=results,
+            role_relevance_score=round(relevance, 4),
         )
 
     def evaluate_requirement(
@@ -255,6 +262,7 @@ class MatchingEngine:
             RequirementType.SKILL: self._skill,
             RequirementType.EDUCATION: self._education,
             RequirementType.CERTIFICATION: self._certification,
+            RequirementType.DOCUMENT: self._document,
             RequirementType.EXPERIENCE: self._experience,
             RequirementType.PROJECT_EXPERIENCE: self._project_experience,
             RequirementType.SECTOR: self._sector,
@@ -364,8 +372,10 @@ class MatchingEngine:
 
         if not targets:
             field_matches = [(item, 1.0) for item in level_eligible]
+            near_matches: list[tuple[PersonEducation, float]] = []
         else:
             field_matches = []
+            near_matches = []
             for item in level_eligible:
                 strength = max(
                     (
@@ -379,6 +389,8 @@ class MatchingEngine:
                 )
                 if strength >= 0.75:
                     field_matches.append((item, strength))
+                elif strength >= 0.45:
+                    near_matches.append((item, strength))
 
         if field_matches:
             item, strength = max(
@@ -424,7 +436,47 @@ class MatchingEngine:
                 "Education is related, but the discipline is not a confirmed equivalent.",
             )
 
-        item = max(level_eligible, key=lambda degree: DEGREE_RANK.get(degree.degree_level.value, 0))
+        # A source phrase such as "or related field" permits a nearby discipline to be
+        # considered, but not to be promoted to a confirmed exact match. This is the guard
+        # that keeps plain Economics below Agricultural Economics while still surfacing it
+        # for human verification when the TOR explicitly allows related disciplines.
+        allows_related = any(
+            marker in normalize(req.label)
+            for marker in (
+                "related field",
+                "related discipline",
+                "relevant field",
+                "equivalent field",
+            )
+        )
+        if allows_related and near_matches:
+            item, strength = max(
+                near_matches,
+                key=lambda pair: (
+                    pair[1],
+                    DEGREE_RANK.get(pair[0].degree_level.value, 0),
+                ),
+            )
+            return RequirementEvaluation(
+                MatchStatus.UNVERIFIED,
+                min(0.68, strength),
+                [
+                    Evidence(
+                        "education",
+                        item.degree_name or item.degree_level.value,
+                        item.field_of_study or item.institution,
+                    )
+                ],
+                (
+                    "The degree level is sufficient and the discipline may be related, "
+                    "but equivalence to the requested field needs verification."
+                ),
+            )
+
+        item = max(
+            level_eligible,
+            key=lambda degree: DEGREE_RANK.get(degree.degree_level.value, 0),
+        )
         evidence = [
             Evidence(
                 "education",
@@ -495,6 +547,93 @@ class MatchingEngine:
             min(1.0, strength + 0.05),
             evidence,
             "Certification evidence closely matches the requested credential.",
+        )
+
+    def _document(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
+        targets = self._targets(req)
+        minimum = req.minimum_count or 1
+
+        def document_strength(document: PersonDocument) -> float:
+            if not targets:
+                return 1.0
+            texts = (document.title, document.description, document.original_filename)
+            return max(
+                (best_strength(texts, target) for target in targets),
+                default=0.0,
+            )
+
+        scored_documents = [
+            (document, document_strength(document)) for document in profile.documents
+        ]
+        matched_documents = [
+            (document, strength) for document, strength in scored_documents if strength >= 0.75
+        ]
+        matched_documents.sort(key=lambda pair: pair[1], reverse=True)
+
+        if len(matched_documents) >= minimum:
+            evidence = [
+                Evidence("document", item.title, item.original_filename)
+                for item, _ in matched_documents[: max(5, minimum)]
+            ]
+            return RequirementEvaluation(
+                MatchStatus.MATCHED,
+                1.0,
+                evidence,
+                f"Found {len(matched_documents)} matching documents vs {minimum} required.",
+            )
+
+        project_evidence: list[Evidence] = []
+        for project in profile.projects:
+            texts = (
+                project.role,
+                project.project_name,
+                project.sector,
+                project.description,
+                project.responsibilities,
+                project.outcomes,
+                project.skills_summary,
+            )
+            strength = (
+                max((best_strength(texts, target) for target in targets), default=0.0)
+                if targets
+                else 0.0
+            )
+            if strength >= 0.75:
+                project_evidence.append(Evidence("project", project.project_name, project.role))
+
+        evidence = [
+            Evidence("document", item.title, item.original_filename)
+            for item, _ in matched_documents[:5]
+        ]
+        evidence.extend(project_evidence[:5])
+
+        if matched_documents or project_evidence:
+            return RequirementEvaluation(
+                MatchStatus.UNVERIFIED,
+                0.65 if project_evidence else 0.55,
+                evidence,
+                (
+                    f"Only {len(matched_documents)} of {minimum} required matching documents "
+                    "are linked. Relevant assignment history exists, but the documentary "
+                    "evidence must be verified."
+                ),
+            )
+
+        # An absent upload is not proof that the consultant lacks the requested certificate or
+        # reference. Treat it as an evidence-verification issue rather than a confirmed
+        # qualification failure.
+        return RequirementEvaluation(
+            MatchStatus.UNVERIFIED,
+            0.4,
+            [
+                Evidence("document", item.title, item.original_filename)
+                for item in profile.documents[:3]
+            ],
+            (
+                f"No matching documentary evidence is linked for the {minimum} required "
+                "item(s). Verify the consultant's supporting documents before concluding "
+                "that the requirement is not met."
+            ),
         )
 
     def _experience(self, profile: PersonProfile, req: RequirementLike) -> RequirementEvaluation:
@@ -633,7 +772,14 @@ class MatchingEngine:
         years = months / 12
         minimum = req.minimum_years or 0.0
         undated = [record for record, _ in matches if not record.start_date]
-        strength = max(score for _, score in matches)
+        if operator == "all_of" and targets:
+            target_strengths = [
+                max((score for _, score in strengths_by_target[target]), default=0.0)
+                for target in targets
+            ]
+            strength = min(target_strengths)
+        else:
+            strength = max(score for _, score in matches)
         evidence = [
             Evidence(record.source, record.label, record.detail) for record, _ in matches[:5]
         ]
@@ -770,7 +916,13 @@ class MatchingEngine:
                 )
 
         if matches:
-            strength = max(score for _, score in matches)
+            if operator == "all_of" and targets:
+                strength = min(
+                    max((score for _, score in scored_by_target[target]), default=0.0)
+                    for target in targets
+                )
+            else:
+                strength = max(score for _, score in matches)
             return RequirementEvaluation(
                 MatchStatus.MATCHED if strength >= 0.88 else MatchStatus.PARTIAL,
                 min(1.0, strength + 0.05),

@@ -320,8 +320,16 @@ def role_relevance(
     summary: str | None,
     employment_titles: Iterable[str],
     project_roles: Iterable[str],
+    education_fields: Iterable[str] = (),
+    skill_names: Iterable[str] = (),
 ) -> float:
-    """Evidence-backed role relevance used only as a modest scoring component."""
+    """Evidence-backed role relevance used as a bounded scoring component.
+
+    Current and historical role titles remain the strongest signals. Structured education and
+    skills provide supporting domain evidence for people whose visible title is generic (for
+    example, a lecturer with a Statistics degree), but they cannot on their own create a strong
+    leadership signal.
+    """
 
     raw_segments = [
         segment.strip() for segment in re.split(r"/|\bor\b", role_title) if segment.strip()
@@ -330,7 +338,7 @@ def role_relevance(
         return 0.0
 
     title_texts = [professional_title, *employment_titles, *project_roles]
-    all_texts = [*title_texts, summary]
+    supporting_texts = [summary, *education_fields, *skill_names]
     segment_scores: list[tuple[str, float]] = []
     for segment in raw_segments:
         tokens = [
@@ -338,8 +346,8 @@ def role_relevance(
         ]
         target = " ".join(tokens) or segment
         direct = best_strength(title_texts, target)
-        contextual = best_strength(all_texts, target)
-        segment_scores.append((normalize_text(segment), max(direct, contextual * 0.85)))
+        supporting = best_strength(supporting_texts, target)
+        segment_scores.append((normalize_text(segment), max(direct, supporting * 0.72)))
 
     leadership = [
         score

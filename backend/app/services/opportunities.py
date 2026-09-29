@@ -33,14 +33,18 @@ from app.models.opportunity_enums import (
 )
 from app.repositories.opportunities import OpportunityRepository
 from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, OpportunityUpdate
-from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile, match_strength
+from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
 from app.services.requirement_extraction import (
     GeminiRequirementExtractor,
     RequirementExtractionError,
 )
-from app.services.requirement_normalization import normalize_requirement_fields
+from app.services.requirement_normalization import (
+    normalize_requirement_fields,
+    normalize_requirement_minimum_count,
+    normalize_requirement_type,
+)
 from app.services.source_ingestion import (
     OpportunitySourceIngestionService,
     SourceIngestionError,
@@ -756,19 +760,21 @@ class OpportunityService:
                 normalized_value, normalized_values, normalized_operator = (
                     normalize_requirement_fields(requirement_data)
                 )
+                normalized_requirement_type = normalize_requirement_type(requirement_data)
+                normalized_minimum_count = normalize_requirement_minimum_count(requirement_data)
                 self.repo.add(
                     OpportunityRequirement(
                         organization_id=self.organization_id,
                         opportunity_id=opportunity.id,
                         analysis_id=analysis.id,
                         role_id=role.id,
-                        requirement_type=requirement_data.requirement_type,
+                        requirement_type=normalized_requirement_type,
                         importance=requirement_data.importance,
                         label=requirement_data.label,
                         normalized_value=normalized_value,
                         values_json=normalized_values,
                         minimum_years=requirement_data.minimum_years,
-                        minimum_count=requirement_data.minimum_count,
+                        minimum_count=normalized_minimum_count,
                         minimum_degree_level=requirement_data.minimum_degree_level,
                         operator=normalized_operator,
                         weight=requirement_data.weight,
@@ -803,8 +809,11 @@ class OpportunityService:
         role_sets: list[RoleCandidateSet] = []
         top_scores: list[float] = []
         best_unverified_by_role: dict[uuid.UUID, bool] = {}
+        best_evaluation_by_role: dict[uuid.UUID, CandidateEvaluation] = {}
+        requirements_by_role: dict[uuid.UUID, list[OpportunityRequirement]] = {}
         for role in roles:
             requirements = await self.repo.requirements(role.id)
+            requirements_by_role[role.id] = requirements
             evaluations = [
                 self.matching.evaluate(profile, requirements, role.title) for profile in profiles
             ]
@@ -813,7 +822,7 @@ class OpportunityService:
                     not item.mandatory_failed,
                     not item.mandatory_unverified,
                     item.score,
-                    match_strength(item.person.professional_title, role.title),
+                    item.role_relevance_score,
                 ),
                 reverse=True,
             )
@@ -860,6 +869,7 @@ class OpportunityService:
                 persisted.append((match, evaluation))
             if persisted:
                 top_scores.append(float(persisted[0][0].score))
+                best_evaluation_by_role[role.id] = persisted[0][1]
                 best_unverified_by_role[role.id] = persisted[0][1].mandatory_unverified
             role_sets.append(
                 RoleCandidateSet(
@@ -916,7 +926,59 @@ class OpportunityService:
             ),
             reverse=True,
         )
-        assessed_options = assessed_options[: self.settings.opportunity_default_team_options]
+        # Prefer genuinely different alternatives instead of three near-identical teams.
+        # A useful alternative should change at least two role assignments when the search
+        # space permits it; if not, fill the remaining slots with the next best options.
+        option_limit = self.settings.opportunity_default_team_options
+        diversified: list[
+            tuple[
+                TeamOption,
+                TeamConstraintAssessment,
+                tuple[str, ...],
+                tuple[str, ...],
+            ]
+        ] = []
+
+        def option_signature(
+            item: tuple[
+                TeamOption,
+                TeamConstraintAssessment,
+                tuple[str, ...],
+                tuple[str, ...],
+            ],
+        ) -> tuple[object, ...]:
+            return tuple(assignment.candidate.person.id for assignment in item[0].assignments)
+
+        for candidate in assessed_options:
+            signature = option_signature(candidate)
+            if not diversified:
+                diversified.append(candidate)
+            else:
+                sufficiently_different = all(
+                    sum(
+                        left != right
+                        for left, right in zip(
+                            signature,
+                            option_signature(existing),
+                            strict=False,
+                        )
+                    )
+                    >= 2
+                    for existing in diversified
+                )
+                if sufficiently_different:
+                    diversified.append(candidate)
+            if len(diversified) >= option_limit:
+                break
+
+        if len(diversified) < option_limit:
+            for candidate in assessed_options:
+                if candidate in diversified:
+                    continue
+                diversified.append(candidate)
+                if len(diversified) >= option_limit:
+                    break
+        assessed_options = diversified
 
         best_team_assessment: TeamConstraintAssessment | None = None
         for index, (
@@ -990,7 +1052,28 @@ class OpportunityService:
         for role in roles:
             matches = await self.repo.candidate_matches(role.id)
             best: CandidateMatch | None = matches[0] if matches else None
+            best_evaluation = best_evaluation_by_role.get(role.id)
+            role_requirements = requirements_by_role.get(role.id, [])
+
+            failed_labels: list[str] = []
+            verification_labels: list[str] = []
+            if best_evaluation is not None:
+                for requirement in role_requirements:
+                    if requirement.importance != RequirementImportance.MANDATORY:
+                        continue
+                    gap_result = best_evaluation.requirement_results.get(requirement.id)
+                    if gap_result is None:
+                        continue
+                    if gap_result.status in {MatchStatus.MISSING, MatchStatus.PARTIAL}:
+                        failed_labels.append(requirement.label)
+                    elif gap_result.status == MatchStatus.UNVERIFIED:
+                        verification_labels.append(requirement.label)
+
             if best is None or best.mandatory_failed:
+                detail = (
+                    "; ".join(failed_labels[:3])
+                    or "No internal candidate fully satisfies the role."
+                )
                 self.repo.add(
                     CapabilityGap(
                         organization_id=self.organization_id,
@@ -1002,12 +1085,14 @@ class OpportunityService:
                         best_candidate_person_id=best.person_id if best else None,
                         best_candidate_score=best.score if best else None,
                         recommendation=(
-                            "Review the failed requirements before considering external "
-                            "recruitment, subcontracting, or partner capability."
+                            f"Confirmed requirement gap(s): {detail} Review the supporting "
+                            "evidence before considering external recruitment, subcontracting, "
+                            "or partner capability."
                         ),
                     )
                 )
             elif best_unverified_by_role.get(role.id, False):
+                detail = "; ".join(verification_labels[:3]) or "Mandatory evidence needs review."
                 self.repo.add(
                     CapabilityGap(
                         organization_id=self.organization_id,
@@ -1019,9 +1104,9 @@ class OpportunityService:
                         best_candidate_person_id=best.person_id,
                         best_candidate_score=best.score,
                         recommendation=(
-                            "Do not treat this as a qualification failure. Review the "
-                            "candidate's evidence and terminology, then rerun the opportunity "
-                            "analysis if needed."
+                            f"Verification required: {detail} Do not treat missing database "
+                            "evidence as a confirmed qualification failure; verify the "
+                            "supporting documents and rerun the analysis if evidence changes."
                         ),
                     )
                 )

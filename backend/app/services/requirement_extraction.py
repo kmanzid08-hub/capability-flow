@@ -112,6 +112,13 @@ Precision rules for matching:
 - For project experience, capture the actual project domain and minimum project count/duration.
 - For certifications, preserve the specific credential or explicit alternatives. Do not treat
   unrelated professional certificates as equivalent.
+- Distinguish professional certifications from supporting documents. "Similar assignment
+  certificates", certificates of completion, reference letters and proof of prior assignments are
+  document requirements, not professional certifications. Use requirement_type='document' and
+  set minimum_count when the source states a number.
+- The human-readable label must remain the precision boundary for machine matching fields. Never
+  return a broader normalized field than the source wording; for example, do not normalize
+  Agricultural Economics to Economics or Livestock Production to Agriculture.
 - Precision is more important than forcing a candidate to fit. It is valid for no candidate to
   satisfy a mandatory requirement. At the same time, preserve legitimate synonyms, acronyms,
   reordered wording and clearly stated alternatives so genuinely qualified people are not lost.

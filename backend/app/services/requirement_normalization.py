@@ -1,6 +1,8 @@
 import re
 from typing import Any
 
+from app.models.opportunity_enums import RequirementType
+
 _RELATED_SUFFIX_RE = re.compile(
     r"(?:,?\s*(?:or|and)\s+)?(?:a\s+)?(?:closely\s+)?(?:related|relevant|equivalent)\s+"
     r"(?:field|discipline|subject|area)(?:s)?\.?$",
@@ -21,8 +23,20 @@ _LEADING_ACTIVITY_RE = re.compile(
     r"undertaking\s+|performing\s+|carrying\s+out\s+|managing\s+|working\s+on\s+)",
     re.IGNORECASE,
 )
-_SPLIT_RE = re.compile(r"\s*(?:,|;|\bor\b)\s*", re.IGNORECASE)
+_SPLIT_RE = re.compile(r"\s*(?:,|;|/|\bor\b)\s*", re.IGNORECASE)
 _AND_RE = re.compile(r"\s+and\s+", re.IGNORECASE)
+_COUNT_RE = re.compile(
+    r"\b(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than)?\s*(\d+)\s+"
+    r"(?:similar\s+)?(?:assignment\s+)?(?:certificate|certificates|reference|references|"
+    r"letter|letters|document|documents)\b",
+    re.IGNORECASE,
+)
+_DOCUMENT_EVIDENCE_RE = re.compile(
+    r"\b(?:similar\s+assignment\s+certificates?|certificates?\s+of\s+(?:good\s+)?completion|"
+    r"completion\s+certificates?|reference\s+letters?|client\s+references?|"
+    r"proof\s+of\s+(?:similar\s+)?assignments?|documentary\s+evidence|supporting\s+documents?)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: str) -> str:
@@ -93,11 +107,53 @@ def _experience_targets(label: str) -> list[str]:
     return _dedupe(expanded)
 
 
+def _document_targets(label: str) -> list[str]:
+    for pattern in (
+        r"\bas\s+(?:a\s+|an\s+|the\s+)?(.+)$",
+        r"\bfor\s+(?:the\s+)?(?:role\s+of\s+)?(.+)$",
+    ):
+        match = re.search(pattern, label, re.IGNORECASE)
+        if match:
+            target = _clean(match.group(1))
+            if target:
+                return [target]
+    return []
+
+
+def _type_name(requirement: Any) -> str:
+    requirement_type = getattr(requirement, "requirement_type", None)
+    return str(getattr(requirement_type, "value", requirement_type) or "").lower()
+
+
+def normalize_requirement_type(requirement: Any) -> RequirementType:
+    """Correct deterministic type mistakes that would change compliance semantics."""
+
+    label = str(getattr(requirement, "label", "") or "").strip()
+    original_name = _type_name(requirement)
+    if _DOCUMENT_EVIDENCE_RE.search(label):
+        return RequirementType.DOCUMENT
+    try:
+        return RequirementType(original_name)
+    except ValueError:
+        return RequirementType.CUSTOM
+
+
+def normalize_requirement_minimum_count(requirement: Any) -> int | None:
+    existing = getattr(requirement, "minimum_count", None)
+    if existing is not None:
+        return int(existing)
+    if normalize_requirement_type(requirement) != RequirementType.DOCUMENT:
+        return None
+    label = str(getattr(requirement, "label", "") or "")
+    match = _COUNT_RE.search(label)
+    return int(match.group(1)) if match else None
+
+
 def _infer_operator(label: str, targets: list[str], current: str) -> str:
     if len(targets) <= 1:
         return "match"
     cleaned_label = _RELATED_SUFFIX_RE.sub("", label).lower()
-    if re.search(r"\bor\b", cleaned_label):
+    if re.search(r"\bor\b", cleaned_label) or "/" in cleaned_label:
         return "one_of"
     if re.search(r"\band\b", cleaned_label):
         return "all_of"
@@ -105,36 +161,43 @@ def _infer_operator(label: str, targets: list[str], current: str) -> str:
 
 
 def normalize_requirement_fields(requirement: Any) -> tuple[str | None, list[str] | None, str]:
-    """Backfill missing semantic targets without overriding explicit AI extraction."""
+    """Normalize machine targets using the source-facing label as the precision boundary.
+
+    AI-provided targets remain useful for unstructured requirement types. For education and
+    experience, however, deterministic targets parsed from the human-readable source label win
+    whenever available. This prevents a broad AI target such as ``Economics`` from silently
+    replacing ``Agricultural Economics`` in the source requirement.
+    """
+
+    label = str(getattr(requirement, "label", "") or "").strip()
+    type_name = normalize_requirement_type(requirement).value
+    operator = str(getattr(requirement, "operator", "match") or "match")
+
+    derived_targets: list[str] = []
+    if type_name == "education":
+        derived_targets = _education_targets(label)
+    elif type_name in {"experience", "project_experience"}:
+        derived_targets = _experience_targets(label)
+    elif type_name == "document":
+        derived_targets = _document_targets(label)
+
+    if derived_targets:
+        if len(derived_targets) == 1:
+            return derived_targets[0], None, "match"
+        return None, derived_targets, _infer_operator(label, derived_targets, operator)
 
     existing_value = getattr(requirement, "normalized_value", None)
     existing_values = list(getattr(requirement, "values", None) or [])
-    operator = str(getattr(requirement, "operator", "match") or "match")
     if existing_value or existing_values:
         explicit_targets = ([existing_value] if existing_value else []) + existing_values
         return (
             existing_value,
             existing_values or None,
             _infer_operator(
-                str(getattr(requirement, "label", "") or ""),
+                label,
                 explicit_targets,
                 operator,
             ),
         )
 
-    label = str(getattr(requirement, "label", "") or "").strip()
-    requirement_type = getattr(requirement, "requirement_type", None)
-    type_name = getattr(requirement_type, "value", requirement_type)
-    type_name = str(type_name or "").lower()
-
-    targets: list[str] = []
-    if type_name == "education":
-        targets = _education_targets(label)
-    elif type_name in {"experience", "project_experience"}:
-        targets = _experience_targets(label)
-
-    if not targets:
-        return None, None, operator
-    if len(targets) == 1:
-        return targets[0], None, "match"
-    return None, targets, _infer_operator(label, targets, operator)
+    return None, None, operator
