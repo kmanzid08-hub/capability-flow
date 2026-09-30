@@ -330,7 +330,13 @@ class FallbackAI:
     ) -> tuple[dict[str, Any], str]:
         # Preserve the current free-first provider order. Circuit breakers only skip
         # providers known to be cooling down.
-        free_max_tokens = min(max_tokens, 3500)
+        # Profile chunks are intentionally compact. Opportunity/quick structured
+        # extraction may contain many roles and requirements, so preserve the
+        # caller's larger budget up to 8,192 tokens.
+        if mode == "profile":
+            free_max_tokens = min(max_tokens, 3500)
+        else:
+            free_max_tokens = min(max_tokens, 8192)
         errors: list[str] = []
         providers: tuple[ProviderName, ...] = ("groq", "openrouter", "openai")
         last_profile_result: tuple[dict[str, Any], str] | None = None
@@ -535,6 +541,7 @@ class FallbackAI:
 
         errors: list[str] = []
         for model in candidates:
+            structured_error: Exception | None = None
             try:
                 data = await self._chat_json(
                     client=client,
@@ -546,26 +553,70 @@ class FallbackAI:
                     require_parameters=False,
                 )
                 logger.info(
-                    "AI fallback succeeded with provider=groq model=%s",
+                    "AI fallback succeeded with provider=groq model=%s mode=json_schema",
                     model,
                 )
                 return data, f"groq:{model}"
             except Exception as exc:
-                logger.warning("Groq model failed: model=%s error=%s", model, str(exc))
-                errors.append(f"{model}: {type(exc).__name__}: {str(exc)}")
+                structured_error = exc
+                logger.warning(
+                    "Groq structured-output attempt failed: model=%s error=%s",
+                    model,
+                    str(exc),
+                )
+                errors.append(f"{model}/json_schema: {type(exc).__name__}: {str(exc)}")
+
+            status_code = getattr(structured_error, "status_code", None) or getattr(
+                structured_error, "code", None
+            )
+            if status_code in (413, "413"):
+                logger.warning(
+                    "Groq model request exceeded that model's token allowance; "
+                    "trying the next Groq model"
+                )
+                continue
+
+            if structured_error is not None and self._is_hard_rate_limit(structured_error):
+                logger.warning(
+                    "Groq hard quota/rate limit detected; switching to the next fallback provider"
+                )
+                break
+
+            # Groq JSON Schema mode can reject otherwise valid generations. Retry the
+            # same model using JSON Object mode with the schema embedded in the prompt
+            # before abandoning the model or provider.
+            json_object_tokens = (
+                max_tokens if mode == "profile" else min(8192, max(max_tokens, 6000))
+            )
+            try:
+                data = await self._chat_json_object(
+                    client=client,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    max_tokens=json_object_tokens,
+                )
+                logger.info(
+                    "AI fallback succeeded with provider=groq model=%s mode=json_object",
+                    model,
+                )
+                return data, f"groq:{model}"
+            except Exception as exc:
+                logger.warning(
+                    "Groq JSON-object recovery failed: model=%s error=%s",
+                    model,
+                    str(exc),
+                )
+                errors.append(f"{model}/json_object: {type(exc).__name__}: {str(exc)}")
 
                 status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
                 if status_code in (413, "413"):
-                    logger.warning(
-                        "Groq model request exceeded that model's token allowance; "
-                        "trying the next Groq model"
-                    )
                     continue
-
                 if self._is_hard_rate_limit(exc):
                     logger.warning(
-                        "Groq hard quota/rate limit detected; switching to the next "
-                        "fallback provider"
+                        "Groq hard quota/rate limit detected during JSON-object recovery; "
+                        "switching to the next fallback provider"
                     )
                     break
 
