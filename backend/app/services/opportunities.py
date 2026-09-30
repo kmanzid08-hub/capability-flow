@@ -1061,9 +1061,9 @@ class OpportunityService:
                 for requirement in role_requirements:
                     if requirement.importance != RequirementImportance.MANDATORY:
                         continue
-                    gap_result = best_evaluation.requirement_results.get(requirement.id)
-                    if gap_result is None:
+                    if requirement.id not in best_evaluation.requirement_results:
                         continue
+                    gap_result = best_evaluation.requirement_results[requirement.id]
                     if gap_result.status in {MatchStatus.MISSING, MatchStatus.PARTIAL}:
                         failed_labels.append(requirement.label)
                     elif gap_result.status == MatchStatus.UNVERIFIED:
