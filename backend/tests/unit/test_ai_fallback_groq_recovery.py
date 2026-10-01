@@ -60,16 +60,17 @@ async def test_groq_retries_json_object_after_json_schema_failure(
         system_prompt="system",
         user_prompt="user",
         schema={"type": "object"},
-        max_tokens=8192,
+        max_tokens=4000,
+        mode="opportunity",
     )
 
     assert data == {"roles": []}
     assert provider == "groq:openai/gpt-oss-20b"
-    assert calls == [("json_schema", 8192), ("json_object", 8192)]
+    assert calls == [("json_schema", 4000), ("json_object", 4000)]
 
 
 @pytest.mark.asyncio
-async def test_non_profile_fallback_preserves_large_output_budget(
+async def test_opportunity_fallback_uses_provider_safe_groq_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ai = object.__new__(FallbackAI)
@@ -93,10 +94,10 @@ async def test_non_profile_fallback_preserves_large_output_budget(
         user_prompt="user",
         schema={"type": "object"},
         max_tokens=8192,
-        mode="quick",
+        mode="opportunity",
     )
 
-    assert captured == [8192]
+    assert captured == [4000]
 
 
 @pytest.mark.asyncio
@@ -132,3 +133,41 @@ async def test_profile_fallback_keeps_compact_output_budget(
     )
 
     assert captured == [3500]
+
+
+@pytest.mark.asyncio
+async def test_opportunity_fallback_preserves_openrouter_budget_after_groq_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai = object.__new__(FallbackAI)
+    ai.settings = SimpleNamespace(
+        groq_api_key="test-key",
+        openrouter_api_key="test-openrouter-key",
+        openai_api_key=None,
+    )
+    ai.provider_health = _HealthyProviderState()
+
+    captured: list[tuple[str, int]] = []
+
+    async def _fake_generate_groq(**kwargs: Any) -> tuple[dict[str, Any], str]:
+        captured.append(("groq", int(kwargs["max_tokens"])))
+        raise ValueError("groq failed")
+
+    async def _fake_generate_openrouter(**kwargs: Any) -> tuple[dict[str, Any], str]:
+        captured.append(("openrouter", int(kwargs["max_tokens"])))
+        return {"roles": []}, "openrouter:test"
+
+    monkeypatch.setattr(ai, "_generate_groq", _fake_generate_groq)
+    monkeypatch.setattr(ai, "_generate_openrouter", _fake_generate_openrouter)
+
+    data, provider = await ai.generate_json(
+        system_prompt="system",
+        user_prompt="user",
+        schema={"type": "object"},
+        max_tokens=8192,
+        mode="opportunity",
+    )
+
+    assert data == {"roles": []}
+    assert provider == "openrouter:test"
+    assert captured == [("groq", 4000), ("openrouter", 8192)]

@@ -328,15 +328,20 @@ class FallbackAI:
         max_tokens: int,
         mode: str = "quick",
     ) -> tuple[dict[str, Any], str]:
-        # Preserve the current free-first provider order. Circuit breakers only skip
-        # providers known to be cooling down.
-        # Profile chunks are intentionally compact. Opportunity/quick structured
-        # extraction may contain many roles and requirements, so preserve the
-        # caller's larger budget up to 8,192 tokens.
+        # Preserve the free-first provider order while respecting provider-specific
+        # request limits. Groq free/on-demand tiers can reject a request when input
+        # tokens + requested output exceed the model's TPM allowance, so opportunity
+        # extraction uses a conservative Groq budget. OpenRouter keeps the caller's
+        # larger structured-output budget.
         if mode == "profile":
-            free_max_tokens = min(max_tokens, 3500)
+            groq_max_tokens = min(max_tokens, 3500)
+            openrouter_max_tokens = min(max_tokens, 3500)
+        elif mode == "opportunity":
+            groq_max_tokens = min(max_tokens, 4000)
+            openrouter_max_tokens = min(max_tokens, 8192)
         else:
-            free_max_tokens = min(max_tokens, 8192)
+            groq_max_tokens = min(max_tokens, 4000)
+            openrouter_max_tokens = min(max_tokens, 6000)
         errors: list[str] = []
         providers: tuple[ProviderName, ...] = ("groq", "openrouter", "openai")
         last_profile_result: tuple[dict[str, Any], str] | None = None
@@ -369,7 +374,7 @@ class FallbackAI:
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
-                        max_tokens=free_max_tokens,
+                        max_tokens=groq_max_tokens,
                         mode=mode,
                     )
                 elif provider == "openrouter":
@@ -377,7 +382,7 @@ class FallbackAI:
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema=schema,
-                        max_tokens=free_max_tokens,
+                        max_tokens=openrouter_max_tokens,
                         mode=mode,
                     )
                 else:
@@ -585,9 +590,10 @@ class FallbackAI:
             # Groq JSON Schema mode can reject otherwise valid generations. Retry the
             # same model using JSON Object mode with the schema embedded in the prompt
             # before abandoning the model or provider.
-            json_object_tokens = (
-                max_tokens if mode == "profile" else min(8192, max(max_tokens, 6000))
-            )
+            # Keep the JSON-object retry within the same provider-safe budget.
+            # The schema is embedded in the prompt for this retry, so increasing the
+            # output allowance here can itself push Groq over its TPM limit.
+            json_object_tokens = max_tokens
             try:
                 data = await self._chat_json_object(
                     client=client,

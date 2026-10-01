@@ -39,7 +39,7 @@ services:
       - key: AI_JOB_WORKER_ENABLED
         value: "true"
       - key: AI_JOB_WORKER_CONCURRENCY
-        value: "2"
+        value: "1"
       - key: AI_JOB_MAX_CONCURRENT_PER_ORGANIZATION
         value: "2"
       - key: AI_JOB_MAX_CONCURRENT_PER_USER

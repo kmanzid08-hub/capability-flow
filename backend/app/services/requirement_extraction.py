@@ -240,6 +240,7 @@ class GeminiRequirementExtractor:
                     user_prompt=user_prompt,
                     schema=schema,
                     max_tokens=8192,
+                    mode="opportunity",
                 )
                 return ExtractedOpportunity.model_validate(data)
             except (AllAIProvidersUnavailable, ValidationError, ValueError, TypeError) as exc:

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -814,9 +815,13 @@ class OpportunityService:
         for role in roles:
             requirements = await self.repo.requirements(role.id)
             requirements_by_role[role.id] = requirements
-            evaluations = [
-                self.matching.evaluate(profile, requirements, role.title) for profile in profiles
-            ]
+            evaluations: list[CandidateEvaluation] = []
+            for profile_index, profile in enumerate(profiles, start=1):
+                evaluations.append(self.matching.evaluate(profile, requirements, role.title))
+                # Matching is CPU-bound Python. Yield regularly so the API can answer
+                # Render health checks while an embedded worker is analyzing an opportunity.
+                if profile_index % 10 == 0:
+                    await asyncio.sleep(0)
             evaluations.sort(
                 key=lambda item: (
                     not item.mandatory_failed,
@@ -887,7 +892,9 @@ class OpportunityService:
         # Team score is the average role-fit score. Mandatory compliance is tracked
         # separately so an unresolved team-level item cannot silently rewrite 100% role
         # matches into an arbitrary 79% score.
-        options = self.optimizer.build(role_sets, None)
+        # Team optimization can be CPU-heavy. Run it in the thread pool so it
+        # cannot monopolize the FastAPI event loop and trigger health-check timeouts.
+        options = await run_in_threadpool(self.optimizer.build, role_sets, None)
         team_requirements = await self.repo.team_requirements(analysis.id)
         profiles_by_person = {profile.person.id: profile for profile in profiles}
 
@@ -914,6 +921,7 @@ class OpportunityService:
                 if assignment.candidate.mandatory_unverified
             )
             assessed_options.append((option, team_assessment, role_failures, role_unverified))
+            await asyncio.sleep(0)
 
         # Fully confirmed teams rank before teams needing verification, which rank before
         # teams with a confirmed mandatory gap. Role-fit score breaks ties.
