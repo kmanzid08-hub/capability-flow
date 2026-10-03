@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,10 +12,15 @@ from app.workers.ai_job_worker import AIJobWorker
 settings = get_settings()
 
 
+def _embedded_worker_enabled() -> bool:
+    value = os.getenv("AI_JOB_WORKER_EMBEDDED", "true").strip().lower()
+    return settings.ai_job_worker_enabled and value in {"1", "true", "yes", "on"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker: AIJobWorker | None = None
-    if settings.ai_job_worker_enabled:
+    if _embedded_worker_enabled():
         worker = AIJobWorker(settings)
         await worker.start()
     app.state.ai_job_worker = worker

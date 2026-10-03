@@ -6,7 +6,7 @@ services:
     region: frankfurt
     rootDir: backend
     buildCommand: pip install .
-    startCommand: python -m alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m alembic upgrade head && python -m app.runtime
     healthCheckPath: /api/v1/health
     autoDeployTrigger: commit
     disk:
@@ -38,6 +38,8 @@ services:
         value: "100"
       - key: AI_JOB_WORKER_ENABLED
         value: "true"
+      - key: AI_JOB_WORKER_EMBEDDED
+        value: "false"
       - key: AI_JOB_WORKER_CONCURRENCY
         value: "1"
       - key: AI_JOB_MAX_CONCURRENT_PER_ORGANIZATION

@@ -21,7 +21,7 @@ class _HealthyProviderState:
 
 
 @pytest.mark.asyncio
-async def test_groq_retries_json_object_after_json_schema_failure(
+async def test_groq_opportunity_prefers_120b_and_skips_json_object_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ai = object.__new__(FallbackAI)
@@ -33,7 +33,13 @@ async def test_groq_retries_json_object_after_json_schema_failure(
 
     class _Models:
         async def list(self) -> Any:
-            return SimpleNamespace(data=[SimpleNamespace(id="openai/gpt-oss-20b")])
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(id="openai/gpt-oss-20b"),
+                    SimpleNamespace(id="openai/gpt-oss-120b"),
+                    SimpleNamespace(id="llama-3.1-8b-instant"),
+                ]
+            )
 
     class _Client:
         models = _Models()
@@ -43,18 +49,20 @@ async def test_groq_retries_json_object_after_json_schema_failure(
         lambda **kwargs: _Client(),
     )
 
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, str, int]] = []
 
-    async def _schema_failure(**kwargs: Any) -> dict[str, Any]:
-        calls.append(("json_schema", int(kwargs["max_tokens"])))
-        raise ValueError("provider did not return a JSON object")
-
-    async def _json_object_success(**kwargs: Any) -> dict[str, Any]:
-        calls.append(("json_object", int(kwargs["max_tokens"])))
+    async def _schema(**kwargs: Any) -> dict[str, Any]:
+        model = str(kwargs["model"])
+        calls.append(("json_schema", model, int(kwargs["max_tokens"])))
+        if model == "openai/gpt-oss-120b":
+            raise ValueError("provider did not return a JSON object")
         return {"roles": []}
 
-    monkeypatch.setattr(ai, "_chat_json", _schema_failure)
-    monkeypatch.setattr(ai, "_chat_json_object", _json_object_success)
+    async def _json_object_should_not_run(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("opportunity extraction must not use Groq JSON-object retry")
+
+    monkeypatch.setattr(ai, "_chat_json", _schema)
+    monkeypatch.setattr(ai, "_chat_json_object", _json_object_should_not_run)
 
     data, provider = await ai._generate_groq(
         system_prompt="system",
@@ -65,8 +73,11 @@ async def test_groq_retries_json_object_after_json_schema_failure(
     )
 
     assert data == {"roles": []}
-    assert provider == "groq:openai/gpt-oss-20b"
-    assert calls == [("json_schema", 4000), ("json_object", 4000)]
+    assert provider == "groq:llama-3.1-8b-instant"
+    assert calls == [
+        ("json_schema", "openai/gpt-oss-120b", 4000),
+        ("json_schema", "llama-3.1-8b-instant", 4000),
+    ]
 
 
 @pytest.mark.asyncio
@@ -171,3 +182,73 @@ async def test_opportunity_fallback_preserves_openrouter_budget_after_groq_failu
     assert data == {"roles": []}
     assert provider == "openrouter:test"
     assert captured == [("groq", 4000), ("openrouter", 8192)]
+
+
+class _GroqBadRequest(Exception):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__("json_validate_failed")
+        self.body = payload
+        self.status_code = 400
+
+
+@pytest.mark.asyncio
+async def test_groq_recovers_valid_failed_generation_without_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai = object.__new__(FallbackAI)
+    ai.settings = SimpleNamespace(
+        groq_api_key="test-key",
+        groq_model="openai/gpt-oss-20b",
+    )
+    ai.provider_health = _HealthyProviderState()
+
+    class _Models:
+        async def list(self) -> Any:
+            return SimpleNamespace(data=[SimpleNamespace(id="openai/gpt-oss-120b")])
+
+    class _Client:
+        models = _Models()
+
+    monkeypatch.setattr(
+        "app.services.ai_fallback.AsyncOpenAI",
+        lambda **kwargs: _Client(),
+    )
+
+    async def _schema_failure(**kwargs: Any) -> dict[str, Any]:
+        raise _GroqBadRequest(
+            {
+                "error": {
+                    "code": "json_validate_failed",
+                    "failed_generation": '{"roles":[{"title":"Team Leader"}]}',
+                }
+            }
+        )
+
+    async def _json_object_should_not_run(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("failed_generation recovery should avoid a second provider call")
+
+    monkeypatch.setattr(ai, "_chat_json", _schema_failure)
+    monkeypatch.setattr(ai, "_chat_json_object", _json_object_should_not_run)
+
+    data, provider = await ai._generate_groq(
+        system_prompt="system",
+        user_prompt="user",
+        schema={"type": "object"},
+        max_tokens=4000,
+        mode="opportunity",
+    )
+
+    assert data == {"roles": [{"title": "Team Leader"}]}
+    assert provider == "groq:openai/gpt-oss-120b:recovered"
+
+
+def test_failed_generation_recovery_rejects_malformed_json() -> None:
+    exc = _GroqBadRequest(
+        {
+            "error": {
+                "code": "json_validate_failed",
+                "failed_generation": '{"roles":[',
+            }
+        }
+    )
+    assert FallbackAI._recover_failed_generation_json(exc) is None

@@ -525,7 +525,18 @@ class FallbackAI:
             max_retries=1,
         )
         configured = self.settings.groq_model.strip()
-        candidates = list(dict.fromkeys((configured, *self.GROQ_MODELS)))
+        if mode == "opportunity":
+            # The 20B model repeatedly exhausts its request/output allowance on
+            # realistic TOR extraction. Prefer 120B and do not send opportunity
+            # extraction to 20B at all.
+            opportunity_candidates = (
+                "openai/gpt-oss-120b",
+                configured if configured != "openai/gpt-oss-20b" else "",
+                "llama-3.1-8b-instant",
+            )
+            candidates = list(dict.fromkeys(model for model in opportunity_candidates if model))
+        else:
+            candidates = list(dict.fromkeys((configured, *self.GROQ_MODELS)))
 
         try:
             models = await client.models.list()
@@ -571,6 +582,18 @@ class FallbackAI:
                 )
                 errors.append(f"{model}/json_schema: {type(exc).__name__}: {str(exc)}")
 
+                # Groq can reject JSON Schema mode even when it generated a complete
+                # object. Its API error may include that object in failed_generation.
+                # Recover and parse it locally before spending another provider call.
+                if mode == "opportunity":
+                    recovered = self._recover_failed_generation_json(exc)
+                    if recovered is not None:
+                        logger.info(
+                            "Recovered Groq opportunity JSON from failed_generation: model=%s",
+                            model,
+                        )
+                        return recovered, f"groq:{model}:recovered"
+
             status_code = getattr(structured_error, "status_code", None) or getattr(
                 structured_error, "code", None
             )
@@ -587,12 +610,18 @@ class FallbackAI:
                 )
                 break
 
-            # Groq JSON Schema mode can reject otherwise valid generations. Retry the
-            # same model using JSON Object mode with the schema embedded in the prompt
-            # before abandoning the model or provider.
-            # Keep the JSON-object retry within the same provider-safe budget.
-            # The schema is embedded in the prompt for this retry, so increasing the
-            # output allowance here can itself push Groq over its TPM limit.
+            # For opportunity extraction, embedding the full schema in a second
+            # JSON-object request materially increases prompt size and has already
+            # pushed Groq requests over provider limits. If failed_generation could
+            # not be recovered, move to another model/provider instead.
+            if mode == "opportunity":
+                logger.warning(
+                    "Skipping Groq JSON-object retry for opportunity extraction: model=%s",
+                    model,
+                )
+                continue
+
+            # Other compact modes retain the same-model JSON Object recovery.
             json_object_tokens = max_tokens
             try:
                 data = await self._chat_json_object(
@@ -806,6 +835,61 @@ class FallbackAI:
         return str(content).strip()
 
     @staticmethod
+    def _failed_generation_text(exc: Exception) -> str | None:
+        def extract(payload: Any) -> str | None:
+            if not isinstance(payload, dict):
+                return None
+            nested = payload.get("error")
+            if isinstance(nested, dict):
+                value = nested.get("failed_generation")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            value = payload.get("failed_generation")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return None
+
+        recovered = extract(getattr(exc, "body", None))
+        if recovered is not None:
+            return recovered
+
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                recovered = extract(response.json())
+            except Exception:
+                recovered = None
+            if recovered is not None:
+                return recovered
+        return None
+
+    @classmethod
+    def _recover_failed_generation_json(cls, exc: Exception) -> dict[str, Any] | None:
+        text = cls._failed_generation_text(exc)
+        if text is None:
+            return None
+        try:
+            return cls._decode_json_text(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    @staticmethod
+    def _decode_json_text(content: str) -> dict[str, Any]:
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        data = json.loads(cleaned)
+        if not isinstance(data, dict):
+            raise ValueError("provider did not return a JSON object")
+        return data
+
+    @staticmethod
     def _decode_response(response: Any) -> dict[str, Any]:
         if not getattr(response, "choices", None):
             raise ValueError("provider returned no choices")
@@ -823,16 +907,4 @@ class FallbackAI:
                 raise ValueError(f"provider refused the request: {refusal}")
             raise ValueError("provider returned empty output")
 
-        cleaned = str(content).strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            cleaned = "\n".join(lines).strip()
-
-        data = json.loads(cleaned)
-        if not isinstance(data, dict):
-            raise ValueError("provider did not return a JSON object")
-        return data
+        return FallbackAI._decode_json_text(str(content))
