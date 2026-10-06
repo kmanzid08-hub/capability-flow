@@ -668,9 +668,9 @@ class OpportunityService:
         await self.session.refresh(analysis)
         try:
             extractor = GeminiRequirementExtractor()
+            extracted = await extractor.extract(source_text)
             analysis.model_name = extractor.model_name
             await self.session.commit()
-            extracted = await extractor.extract(source_text)
             await self._persist_extracted(opportunity, analysis, extracted)
 
             mandatory_without_requirements = any(

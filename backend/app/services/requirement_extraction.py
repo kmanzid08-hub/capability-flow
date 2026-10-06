@@ -140,6 +140,7 @@ class GeminiRequirementExtractor:
         self.opportunity_settings = get_opportunity_intelligence_settings()
         self.fallback_ai = FallbackAI(self.app_settings)
         self.provider_health = get_provider_health()
+        self._providers_used: list[str] = []
 
         if not self.app_settings.gemini_api_key and not self.fallback_ai.configured:
             raise RequirementExtractionError(
@@ -148,13 +149,34 @@ class GeminiRequirementExtractor:
 
     @property
     def model_name(self) -> str:
+        providers = list(dict.fromkeys(self._providers_used))
+        if len(providers) == 1:
+            return providers[0]
+        if len(providers) > 1:
+            return ("mixed:" + "|".join(providers))[:120]
         if self.app_settings.gemini_api_key:
             return self.app_settings.ai_model
         if self.app_settings.groq_api_key:
             return f"groq:{self.app_settings.groq_model}"
         return f"openrouter:{self.app_settings.openrouter_model}"
 
+    def _record_provider(
+        self,
+        provider: str,
+        *,
+        chunk_index: int,
+        chunk_count: int,
+    ) -> None:
+        self._providers_used.append(provider)
+        logger.info(
+            "Opportunity extraction chunk completed: chunk=%s/%s provider=%s",
+            chunk_index,
+            chunk_count,
+            provider,
+        )
+
     async def extract(self, source_text: str) -> ExtractedOpportunity:
+        self._providers_used = []
         source_text = source_text[: self.opportunity_settings.opportunity_max_source_characters]
         chunks = self._chunk_source(source_text)
         results: list[ExtractedOpportunity] = []
@@ -199,7 +221,10 @@ class GeminiRequirementExtractor:
                 )
                 logger.warning(
                     "Skipping Gemini opportunity extraction while circuit is open: "
-                    "status=%s reason=%s opened_until=%s",
+                    "chunk=%s/%s model=%s status=%s reason=%s opened_until=%s",
+                    chunk_index,
+                    chunk_count,
+                    self.app_settings.ai_model,
                     snapshot.status,
                     snapshot.reason,
                     snapshot.opened_until,
@@ -228,21 +253,45 @@ class GeminiRequirementExtractor:
                     result = ExtractedOpportunity.model_validate(json.loads(payload))
                 except Exception as exc:
                     gemini_error = exc
-                    self.provider_health.record_failure("gemini", exc)
+                    snapshot = self.provider_health.record_failure("gemini", exc)
+                    logger.warning(
+                        "Gemini opportunity extraction failed: "
+                        "chunk=%s/%s model=%s error_type=%s error=%s "
+                        "health=%s reason=%s opened_until=%s",
+                        chunk_index,
+                        chunk_count,
+                        self.app_settings.ai_model,
+                        type(exc).__name__,
+                        str(exc)[:600],
+                        snapshot.status,
+                        snapshot.reason,
+                        snapshot.opened_until,
+                    )
                 else:
                     self.provider_health.record_success("gemini")
+                    self._record_provider(
+                        f"gemini:{self.app_settings.ai_model}",
+                        chunk_index=chunk_index,
+                        chunk_count=chunk_count,
+                    )
                     return result
 
         if self.fallback_ai.configured:
             try:
-                data, _provider = await self.fallback_ai.generate_json(
+                data, provider = await self.fallback_ai.generate_json(
                     system_prompt=SYSTEM_INSTRUCTIONS,
                     user_prompt=user_prompt,
                     schema=schema,
                     max_tokens=3000,
                     mode="opportunity",
                 )
-                return ExtractedOpportunity.model_validate(data)
+                result = ExtractedOpportunity.model_validate(data)
+                self._record_provider(
+                    provider,
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                )
+                return result
             except (AllAIProvidersUnavailable, ValidationError, ValueError, TypeError) as exc:
                 raise RequirementExtractionError(
                     "Gemini and all configured fallback providers failed opportunity analysis"
