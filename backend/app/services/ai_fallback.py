@@ -337,8 +337,8 @@ class FallbackAI:
             groq_max_tokens = min(max_tokens, 3500)
             openrouter_max_tokens = min(max_tokens, 3500)
         elif mode == "opportunity":
-            groq_max_tokens = min(max_tokens, 4000)
-            openrouter_max_tokens = min(max_tokens, 8192)
+            groq_max_tokens = min(max_tokens, 1600)
+            openrouter_max_tokens = min(max_tokens, 3000)
         else:
             groq_max_tokens = min(max_tokens, 4000)
             openrouter_max_tokens = min(max_tokens, 6000)
@@ -708,7 +708,11 @@ class FallbackAI:
             )
 
         if isinstance(structured_error, AIOutputTruncated):
-            retry_tokens = min(8192, max(max_tokens * 2, 6000))
+            retry_tokens = (
+                min(4000, max(max_tokens + 1000, 3000))
+                if mode == "opportunity"
+                else min(8192, max(max_tokens * 2, 6000))
+            )
             try:
                 data = await self._chat_json(
                     client=client,
@@ -746,7 +750,7 @@ class FallbackAI:
         # Opportunity extraction gets a larger second-chance budget because the
         # result can contain many roles and requirements.
         json_object_tokens = (
-            min(8192, max(max_tokens, 6000)) if mode == "opportunity" else max_tokens
+            min(4000, max(max_tokens, 3000)) if mode == "opportunity" else max_tokens
         )
         data = await self._chat_json_object(
             client=client,

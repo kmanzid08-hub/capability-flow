@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { BriefcaseBusiness, ChevronsUpDown, GitBranch, Layers2, LayoutDashboard, LogOut, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings2, Users, WifiOff } from "lucide-react";
 import { Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
 import { session } from "../lib/session";
 import { useWorkspace } from "../lib/workspace";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -67,7 +67,18 @@ export function AppLayout() {
     </aside>
     <div className="cf-content"><header className="cf-topbar"><div className="flex items-center gap-2 min-w-0"><span className="cf-mobile-brand cf-logo"><Layers2 size={15} /></span><span className="truncate text-xs text-slate-400">{membership?.organization_name ?? "Workspace"}</span><span className="text-slate-300">/</span><span className="text-xs font-medium">{active?.label ?? "Details"}</span></div><div className="flex items-center gap-5"><button className="cf-topbar-search" onClick={() => setCommandOpen(true)} aria-label="Search workspace (Control or Command K)"><Search size={15} /><span>Search anything</span><kbd>Ctrl K</kbd></button><button className="cf-icon-button" aria-label="Account and workspaces" onClick={() => setAccountOpen(true)}><Avatar name={user.data?.full_name ?? "User"} /></button></div></header>
       {offline && <div className="cf-offline" role="status"><WifiOff size={14} /> You are offline. Saved records will refresh when you reconnect.</div>}
-      {user.error && <div className="px-6 pt-4"><div className="cf-alert cf-alert-error">{user.error.message} <button className="underline" onClick={() => void logout()}>Sign in again</button></div></div>}
+      {user.error && <div className="px-6 pt-4"><div className="cf-alert cf-alert-error">
+        {user.error instanceof ApiError && user.error.status === 401 ? (
+          <>{user.error.message} <button className="underline" onClick={() => void logout()}>Sign in again</button></>
+        ) : (
+          <>
+            {user.error instanceof ApiError && user.error.status === 0
+              ? "Capability Flow is temporarily unavailable. Your session is still saved."
+              : user.error.message}{" "}
+            <button className="underline" onClick={() => void user.refetch()}>Retry</button>
+          </>
+        )}
+      </div></div>}
       <main id="workspace-main" key={snapshot} tabIndex={-1}><ErrorBoundary><Suspense fallback={<PageSkeleton />}><Outlet /></Suspense></ErrorBoundary></main>
     </div>
     <nav className="cf-mobile-nav" aria-label="Mobile navigation">{navItems.map(({ icon: Icon, ...item }) => <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => isActive ? "active" : ""}><Icon size={19} strokeWidth={1.6} /><span>{item.label}</span></NavLink>)}<button onClick={() => setCreating(true)} aria-label="Workspace menu" className="sr-only">Workspace</button></nav>

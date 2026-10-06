@@ -16,6 +16,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.9
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: DATABASE_URL
         sync: false
       - key: JWT_SECRET_KEY
@@ -43,7 +45,7 @@ services:
       - key: AI_JOB_WORKER_CONCURRENCY
         value: "1"
       - key: AI_JOB_MAX_CONCURRENT_PER_ORGANIZATION
-        value: "2"
+        value: "1"
       - key: AI_JOB_MAX_CONCURRENT_PER_USER
         value: "1"
       - key: AI_JOB_MAX_ACTIVE_PER_ORGANIZATION
@@ -65,9 +67,9 @@ services:
       - key: OPPORTUNITY_MAX_SOURCE_CHARACTERS
         value: "2000000"
       - key: OPPORTUNITY_ANALYSIS_CHUNK_CHARACTERS
-        value: "100000"
-      - key: OPPORTUNITY_ANALYSIS_CHUNK_OVERLAP
         value: "5000"
+      - key: OPPORTUNITY_ANALYSIS_CHUNK_OVERLAP
+        value: "500"
       - key: AI_PROVIDER
         value: anthropic
       - key: ANTHROPIC_API_KEY

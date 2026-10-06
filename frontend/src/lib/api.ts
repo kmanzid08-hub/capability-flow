@@ -80,7 +80,14 @@ async function request<T>(path: string, init: ApiRequestInit, read: (response: R
       if (externalSignal?.aborted) throw new ApiError(0, "Request aborted by user.");
       throw new ApiError(0, timedOut ? "The request timed out. Refresh the status before retrying an analysis." : "The request was aborted.");
     }
-    throw new ApiError(0, error instanceof Error ? error.message : "Unable to reach the server.");
+    const message = error instanceof Error ? error.message : "";
+    if (/failed to fetch|network|load failed/i.test(message)) {
+      throw new ApiError(
+        0,
+        "Capability Flow cannot reach the server right now. Your session is still saved. Please try again shortly.",
+      );
+    }
+    throw new ApiError(0, message || "Unable to reach the server.");
   } finally {
     window.clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", cancel);

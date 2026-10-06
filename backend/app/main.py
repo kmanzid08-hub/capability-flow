@@ -1,13 +1,16 @@
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
-from app.workers.ai_job_worker import AIJobWorker
+
+if TYPE_CHECKING:
+    from app.workers.ai_job_worker import AIJobWorker
 
 settings = get_settings()
 
@@ -21,7 +24,11 @@ def _embedded_worker_enabled() -> bool:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker: AIJobWorker | None = None
     if _embedded_worker_enabled():
-        worker = AIJobWorker(settings)
+        # Keep worker-only imports out of the web process when Render runs the
+        # durable worker as a sibling process. This reduces duplicate memory use.
+        from app.workers.ai_job_worker import AIJobWorker as RuntimeAIJobWorker
+
+        worker = RuntimeAIJobWorker(settings)
         await worker.start()
     app.state.ai_job_worker = worker
     try:

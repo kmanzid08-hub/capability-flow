@@ -108,7 +108,7 @@ async def test_opportunity_fallback_uses_provider_safe_groq_budget(
         mode="opportunity",
     )
 
-    assert captured == [4000]
+    assert captured == [1600]
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,7 @@ async def test_opportunity_fallback_preserves_openrouter_budget_after_groq_failu
 
     assert data == {"roles": []}
     assert provider == "openrouter:test"
-    assert captured == [("groq", 4000), ("openrouter", 8192)]
+    assert captured == [("groq", 1600), ("openrouter", 3000)]
 
 
 class _GroqBadRequest(Exception):

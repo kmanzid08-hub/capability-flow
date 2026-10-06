@@ -239,7 +239,7 @@ class GeminiRequirementExtractor:
                     system_prompt=SYSTEM_INSTRUCTIONS,
                     user_prompt=user_prompt,
                     schema=schema,
-                    max_tokens=8192,
+                    max_tokens=3000,
                     mode="opportunity",
                 )
                 return ExtractedOpportunity.model_validate(data)
@@ -254,11 +254,21 @@ class GeminiRequirementExtractor:
 
     def _chunk_source(self, text: str) -> list[str]:
         text = text.strip()
-        maximum = self.opportunity_settings.opportunity_analysis_chunk_characters
-        overlap = min(
-            self.opportunity_settings.opportunity_analysis_chunk_overlap,
-            max(0, maximum // 4),
-        )
+        configured_maximum = self.opportunity_settings.opportunity_analysis_chunk_characters
+        configured_overlap = self.opportunity_settings.opportunity_analysis_chunk_overlap
+        app_settings = getattr(self, "app_settings", None)
+        if app_settings is None or app_settings.gemini_api_key:
+            # Gemini is not constrained by the Groq fallback tier's observed 8k TPM
+            # allowance, so preserve the configured deployment chunk size.
+            maximum = configured_maximum
+            overlap_limit = configured_overlap
+        else:
+            # Provider-safe ceiling for the free/on-demand fallback path. Keep the
+            # system instructions, JSON schema, source and output budget inside the
+            # provider request allowance.
+            maximum = min(configured_maximum, 5_000)
+            overlap_limit = min(configured_overlap, 500)
+        overlap = min(overlap_limit, max(0, maximum // 4))
         if len(text) <= maximum:
             return [text]
 

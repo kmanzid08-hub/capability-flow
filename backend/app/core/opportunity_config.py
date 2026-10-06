@@ -32,12 +32,12 @@ class OpportunityIntelligenceSettings(BaseSettings):
         le=500 * 1024 * 1024,
     )
     opportunity_analysis_chunk_characters: int = Field(
-        default=100_000,
-        ge=20_000,
+        default=5_000,
+        ge=3_000,
         le=200_000,
     )
     opportunity_analysis_chunk_overlap: int = Field(
-        default=5_000,
+        default=500,
         ge=0,
         le=25_000,
     )
