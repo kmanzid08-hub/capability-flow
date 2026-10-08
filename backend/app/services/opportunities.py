@@ -34,6 +34,7 @@ from app.models.opportunity_enums import (
 )
 from app.repositories.opportunities import OpportunityRepository
 from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, OpportunityUpdate
+from app.services.ai_jobs import AIJobService
 from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
@@ -596,6 +597,7 @@ class OpportunityService:
         opportunity_id: uuid.UUID,
         *,
         max_age: timedelta = timedelta(minutes=30),
+        respect_active_job: bool = True,
     ) -> None:
         """Recover an analysis left active after a worker/process restart."""
         item = await self.repo.latest_analysis(opportunity_id)
@@ -616,6 +618,18 @@ class OpportunityService:
 
         if datetime.now(UTC) - started_at <= max_age:
             return
+
+        if respect_active_job:
+            job_service = AIJobService(
+                self.session,
+                self.organization_id,
+                self.user_id,
+            )
+            if await job_service.opportunity_job_active(opportunity_id):
+                # The durable queue is the source of truth for active work.
+                # Do not let GET polling falsely fail a healthy long-running job.
+                await self.session.commit()
+                return
 
         item.status = AnalysisStatus.FAILED
         item.error_message = (
@@ -642,6 +656,7 @@ class OpportunityService:
             await self._recover_stale_analysis(
                 opportunity_id,
                 max_age=timedelta(seconds=0),
+                respect_active_job=False,
             )
         opportunity = await self.get(opportunity_id)
         workflow_status = opportunity.status

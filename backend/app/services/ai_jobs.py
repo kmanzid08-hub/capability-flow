@@ -129,6 +129,10 @@ class AIJobService:
                 raise
             return EnqueuedAIJob(existing, False)
 
+    async def opportunity_job_active(self, opportunity_id: uuid.UUID) -> bool:
+        active_key = self.opportunity_key(self.organization_id, opportunity_id)
+        return await self.repo.active_by_key(active_key) is not None
+
     async def active_document_ids(
         self,
         document_ids: list[uuid.UUID],
