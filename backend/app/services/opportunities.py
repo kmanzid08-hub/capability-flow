@@ -689,6 +689,8 @@ class OpportunityService:
         await self.session.commit()
         await self.session.refresh(analysis)
         analysis_id = analysis.id
+        # refresh() opens a transaction; close it before multi-minute AI extraction.
+        await self.session.commit()
         try:
             extractor = GeminiRequirementExtractor()
             extracted = await extractor.extract(source_text)
