@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from heapq import nlargest
 
 from app.services.matching import CandidateEvaluation
 
@@ -61,34 +62,31 @@ class TeamOptimizer:
             ([], set(), 0.0, 0, 0)
         ]
         for role_id, role_title, candidates in slots:
-            expanded: list[tuple[list[TeamAssignment], set[object], float, int, int]] = []
-            for assignments, used_ids, score_sum, failures, unverified in beam:
-                for candidate in candidates:
-                    person_id = candidate.person.id
-                    if person_id in used_ids:
-                        continue
-                    assignment = TeamAssignment(role_id, role_title, candidate)
-                    expanded.append(
-                        (
-                            [*assignments, assignment],
-                            {*used_ids, person_id},
-                            score_sum + candidate.score,
-                            failures + int(candidate.mandatory_failed),
-                            unverified + int(candidate.mandatory_unverified),
-                        )
-                    )
-            if not expanded:
-                return []
-            slot_count = len(expanded[0][0])
-            expanded.sort(
+            expanded_states = (
+                (
+                    [*assignments, TeamAssignment(role_id, role_title, candidate)],
+                    {*used_ids, candidate.person.id},
+                    score_sum + candidate.score,
+                    failures + int(candidate.mandatory_failed),
+                    unverified + int(candidate.mandatory_unverified),
+                )
+                for assignments, used_ids, score_sum, failures, unverified in beam
+                for candidate in candidates
+                if candidate.person.id not in used_ids
+            )
+
+            slot_count = len(beam[0][0]) + 1
+            beam = nlargest(
+                self.beam_width,
+                expanded_states,
                 key=lambda item: (
                     -item[3],
                     -item[4],
                     item[2] / slot_count,
                 ),
-                reverse=True,
             )
-            beam = expanded[: self.beam_width]
+            if not beam:
+                return []
 
         options = [
             TeamOption(

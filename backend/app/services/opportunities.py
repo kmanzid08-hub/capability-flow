@@ -61,6 +61,28 @@ class TeamConstraintAssessment:
     unverified_labels: tuple[str, ...]
 
 
+def _candidate_rank_key(
+    item: CandidateEvaluation,
+) -> tuple[bool, bool, float, float]:
+    return (
+        not item.mandatory_failed,
+        not item.mandatory_unverified,
+        float(item.score),
+        float(item.role_relevance_score),
+    )
+
+
+def _retain_top_candidate_evaluations(
+    evaluations: list[CandidateEvaluation],
+    limit: int,
+) -> None:
+    if limit <= 0:
+        evaluations.clear()
+        return
+    evaluations.sort(key=_candidate_rank_key, reverse=True)
+    del evaluations[limit:]
+
+
 class OpportunityService:
     def __init__(
         self,
@@ -666,6 +688,7 @@ class OpportunityService:
             opportunity.status = OpportunityStatus.ANALYZING
         await self.session.commit()
         await self.session.refresh(analysis)
+        analysis_id = analysis.id
         try:
             extractor = GeminiRequirementExtractor()
             extracted = await extractor.extract(source_text)
@@ -707,11 +730,17 @@ class OpportunityService:
             await self.session.refresh(analysis)
             return analysis
         except Exception as exc:
-            analysis.status = AnalysisStatus.FAILED
-            analysis.error_message = str(exc)
-            analysis.completed_at = datetime.now(UTC)
+            await self.session.rollback()
+            failed_analysis = await self.session.get(OpportunityAnalysis, analysis_id)
+            if failed_analysis is not None:
+                failed_analysis.status = AnalysisStatus.FAILED
+                failed_analysis.error_message = str(exc)
+                failed_analysis.completed_at = datetime.now(UTC)
+
+            failed_opportunity = await self.get(opportunity_id)
             if not workflow_locked:
-                opportunity.status = OpportunityStatus.NEEDS_REVIEW
+                failed_opportunity.status = OpportunityStatus.NEEDS_REVIEW
+
             await self.session.commit()
             if isinstance(exc, RequirementExtractionError):
                 raise HTTPException(
@@ -807,31 +836,35 @@ class OpportunityService:
     async def _run_matching(self, opportunity: Opportunity, analysis: OpportunityAnalysis) -> None:
         profiles = await self.matching.load_profiles()
         roles = await self.repo.roles(analysis.id)
+        # SQLAlchemy autobegins on SELECT. End this read transaction before
+        # CPU-heavy matching so PostgreSQL cannot kill it as idle-in-transaction.
+        await self.session.commit()
+
         role_sets: list[RoleCandidateSet] = []
         top_scores: list[float] = []
         best_unverified_by_role: dict[uuid.UUID, bool] = {}
         best_evaluation_by_role: dict[uuid.UUID, CandidateEvaluation] = {}
         requirements_by_role: dict[uuid.UUID, list[OpportunityRequirement]] = {}
+        candidate_limit = self.settings.opportunity_max_candidates_per_role
+        prune_threshold = max(candidate_limit * 2, candidate_limit + 1)
+
         for role in roles:
             requirements = await self.repo.requirements(role.id)
             requirements_by_role[role.id] = requirements
+            await self.session.commit()
+
             evaluations: list[CandidateEvaluation] = []
             for profile_index, profile in enumerate(profiles, start=1):
                 evaluations.append(self.matching.evaluate(profile, requirements, role.title))
+                if len(evaluations) >= prune_threshold:
+                    _retain_top_candidate_evaluations(evaluations, candidate_limit)
+
                 # Matching is CPU-bound Python. Yield regularly so the API can answer
                 # Render health checks while an embedded worker is analyzing an opportunity.
                 if profile_index % 10 == 0:
                     await asyncio.sleep(0)
-            evaluations.sort(
-                key=lambda item: (
-                    not item.mandatory_failed,
-                    not item.mandatory_unverified,
-                    item.score,
-                    item.role_relevance_score,
-                ),
-                reverse=True,
-            )
-            evaluations = evaluations[: self.settings.opportunity_max_candidates_per_role]
+
+            _retain_top_candidate_evaluations(evaluations, candidate_limit)
             persisted: list[tuple[CandidateMatch, CandidateEvaluation]] = []
             for rank, evaluation in enumerate(evaluations, start=1):
                 match = CandidateMatch(
@@ -884,6 +917,7 @@ class OpportunityService:
                     [item[1] for item in persisted],
                 )
             )
+            await self.session.commit()
 
         await self.session.commit()
         analysis.status = AnalysisStatus.BUILDING_TEAM
@@ -894,9 +928,19 @@ class OpportunityService:
         # matches into an arbitrary 79% score.
         # Team optimization can be CPU-heavy. Run it in the thread pool so it
         # cannot monopolize the FastAPI event loop and trigger health-check timeouts.
+        candidate_person_ids = {
+            candidate.person.id for role_set in role_sets for candidate in role_set.candidates
+        }
+        profiles_by_person = {
+            profile.person.id: profile
+            for profile in profiles
+            if profile.person.id in candidate_person_ids
+        }
+        profiles.clear()
+
         options = await run_in_threadpool(self.optimizer.build, role_sets, None)
         team_requirements = await self.repo.team_requirements(analysis.id)
-        profiles_by_person = {profile.person.id: profile for profile in profiles}
+        await self.session.commit()
 
         assessed_options: list[
             tuple[
