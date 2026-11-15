@@ -182,8 +182,8 @@ class GeminiRequirementExtractor:
         results: list[ExtractedOpportunity] = []
 
         for index, chunk in enumerate(chunks, start=1):
-            results.append(
-                await self._extract_one(
+            results.extend(
+                await self._extract_with_adaptive_split(
                     chunk,
                     chunk_index=index,
                     chunk_count=len(chunks),
@@ -191,6 +191,74 @@ class GeminiRequirementExtractor:
             )
 
         return self._merge_results(results)
+
+    async def _extract_with_adaptive_split(
+        self,
+        source_text: str,
+        *,
+        chunk_index: int,
+        chunk_count: int,
+        depth: int = 0,
+    ) -> list[ExtractedOpportunity]:
+        """Retry truncated JSON on smaller sections without silently losing evidence.
+
+        Provider quota failures are not fixed by splitting. Only explicit output
+        truncation triggers subdivision, with a bounded recursion depth.
+        """
+        try:
+            return [
+                await self._extract_one(
+                    source_text,
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                )
+            ]
+        except RequirementExtractionError as exc:
+            causes: list[BaseException] = []
+            current: BaseException | None = exc
+            while current is not None:
+                causes.append(current)
+                current = current.__cause__
+            truncation = any(
+                "AIOutputTruncated" in str(cause)
+                or "output token limit was reached" in str(cause).lower()
+                for cause in causes
+            )
+            if not truncation or depth >= 3 or len(source_text) < 1_200:
+                raise
+
+            midpoint = len(source_text) // 2
+            split = source_text.rfind("\n", 0, midpoint + 1)
+            if split < midpoint // 2:
+                split = source_text.find("\n", midpoint)
+            if split < midpoint // 2 or split > 3 * len(source_text) // 4:
+                split = midpoint
+            left = source_text[:split].strip()
+            right = source_text[split:].strip()
+            if not left or not right:
+                raise
+
+            logger.warning(
+                "Opportunity extraction output truncated; splitting source: "
+                "chunk=%s/%s depth=%s chars=%s",
+                chunk_index,
+                chunk_count,
+                depth + 1,
+                len(source_text),
+            )
+            left_results = await self._extract_with_adaptive_split(
+                left,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                depth=depth + 1,
+            )
+            right_results = await self._extract_with_adaptive_split(
+                right,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                depth=depth + 1,
+            )
+            return left_results + right_results
 
     async def _extract_one(
         self,
