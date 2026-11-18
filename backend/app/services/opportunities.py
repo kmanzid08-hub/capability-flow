@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.core.opportunity_config import get_opportunity_intelligence_settings
+from app.db.session import AsyncSessionLocal
 from app.models.opportunity import (
     CandidateMatch,
     CapabilityGap,
@@ -37,7 +38,6 @@ from app.repositories.opportunities import OpportunityRepository
 from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, OpportunityUpdate
 from app.services.ai_jobs import AIJobService
 from app.services.consultant_retrieval import ConsultantEvidenceRetriever, summarize_shadow_recall
-from app.db.session import AsyncSessionLocal
 from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
