@@ -11,6 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
+from openai import AsyncOpenAI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -136,6 +137,73 @@ class ConsultantEvidenceRetriever:
                      "kind": kind, "evidence": evidence_id},
                 )
         return count
+
+    async def embed_missing(
+        self,
+        *,
+        api_key: str,
+        model: str = "text-embedding-3-small",
+        batch_size: int = 32,
+    ) -> int:
+        """Index only missing vectors. Explicit opt-in key prevents surprise billing."""
+        client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
+        result = await self.session.execute(
+            text(
+                "SELECT person_id, evidence_type, evidence_id, content "
+                "FROM consultant_evidence_index "
+                "WHERE organization_id=:org "
+                "AND (embedding IS NULL OR embedding_model != :model) "
+                "ORDER BY person_id, evidence_type, evidence_id"
+            ),
+            {"org": self.organization_id, "model": model},
+        )
+        rows = list(result)
+        await self.session.commit()
+        completed = 0
+        for offset in range(0, len(rows), batch_size):
+            batch = rows[offset : offset + batch_size]
+            response = await client.embeddings.create(
+                model=model, input=[item.content for item in batch],
+                dimensions=1536,
+            )
+            vectors = sorted(response.data, key=lambda item: item.index)
+            if len(vectors) != len(batch):
+                raise ValueError("Embedding provider returned the wrong number of vectors")
+            for item, vector in zip(batch, vectors, strict=True):
+                if len(vector.embedding) != 1536:
+                    raise ValueError("Embedding dimension mismatch")
+                literal = "[" + ",".join(str(v) for v in vector.embedding) + "]"
+                await self.session.execute(
+                    text(
+                        "UPDATE consultant_evidence_index "
+                        "SET embedding=CAST(:embedding AS vector), "
+                        "embedding_model=:model, updated_at=now() "
+                        "WHERE organization_id=:org AND person_id=:person "
+                        "AND evidence_type=:kind AND evidence_id=:evidence "
+                        "AND embedding IS NULL"
+                    ),
+                    {
+                        "org": self.organization_id, "person": item.person_id,
+                        "kind": item.evidence_type, "evidence": item.evidence_id,
+                        "model": model, "embedding": literal,
+                    },
+                )
+                completed += 1
+            await self.session.commit()
+        return completed
+
+    @staticmethod
+    async def embed_query(
+        query: str, *, api_key: str, model: str = "text-embedding-3-small"
+    ) -> list[float]:
+        client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
+        response = await client.embeddings.create(
+            model=model, input=query[:8000], dimensions=1536
+        )
+        vector = response.data[0].embedding
+        if len(vector) != 1536:
+            raise ValueError("Embedding dimension mismatch")
+        return vector
 
     async def retrieve(
         self,
