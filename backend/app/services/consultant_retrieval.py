@@ -8,7 +8,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from google import genai
 from google.genai import types
@@ -59,22 +59,29 @@ def evidence_records(profile: PersonProfile) -> list[EvidenceRecord]:
         if content:
             entries.append(EvidenceRecord(person.id, category, source.id, content[:6000]))
 
-    for item in profile.skills:
-        add("skill", item, item.name, item.notes, item.years_experience)
-    for item in profile.education:
-        add("education", item, item.degree_level.value, item.degree_name, item.field_of_study)
-    for item in profile.certifications:
-        add("certification", item, item.name, item.issuer, item.notes)
-    for item in profile.employment:
+    for skill in profile.skills:
+        add("skill", skill, skill.name, skill.notes, skill.years_experience)
+    for education in profile.education:
         add(
-            "employment", item, item.job_title, item.industry, item.description,
-            item.responsibilities, item.achievements, item.country,
+            "education", education, education.degree_level.value,
+            education.degree_name, education.field_of_study,
         )
-    for item in profile.projects:
+    for certification in profile.certifications:
         add(
-            "project", item, item.project_name, item.role, item.sector,
-            item.description, item.responsibilities, item.outcomes,
-            item.skills_summary, item.country,
+            "certification", certification, certification.name,
+            certification.issuer, certification.notes,
+        )
+    for employment in profile.employment:
+        add(
+            "employment", employment, employment.job_title, employment.industry,
+            employment.description, employment.responsibilities,
+            employment.achievements, employment.country,
+        )
+    for project in profile.projects:
+        add(
+            "project", project, project.project_name, project.role,
+            project.sector, project.description, project.responsibilities,
+            project.outcomes, project.skills_summary, project.country,
         )
     # Do not store raw CV text, phone numbers or emails in the vector index.
     return entries
@@ -157,13 +164,13 @@ class ConsultantEvidenceRetriever:
                 )
                 response = await client.models.embed_content(
                     model=model,
-                    contents=texts,
+                    contents=cast(Any, texts),
                     config=config,
                 )
             vectors = [item.values for item in (response.embeddings or [])]
         elif provider == "openai":
-            client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
-            response = await client.embeddings.create(
+            openai_client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
+            response = await openai_client.embeddings.create(
                 model=model, input=texts, dimensions=1536,
             )
             vectors = [
