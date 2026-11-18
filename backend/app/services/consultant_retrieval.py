@@ -180,7 +180,7 @@ class ConsultantEvidenceRetriever:
                         "embedding_model=:model, updated_at=now() "
                         "WHERE organization_id=:org AND person_id=:person "
                         "AND evidence_type=:kind AND evidence_id=:evidence "
-                        "AND embedding IS NULL"
+                        "AND (embedding IS NULL OR embedding_model != :model)"
                     ),
                     {
                         "org": self.organization_id, "person": item.person_id,
@@ -221,7 +221,7 @@ class ConsultantEvidenceRetriever:
         if query_embedding is not None and len(query_embedding) != 1536:
             raise ValueError("Expected 1536-dimensional query embedding")
         terms = query_terms(query)
-        lexical_query = " ".join(sorted(terms))
+        # OR rather than AND: one evidence entry should not need to contain every\n        # qualification from a multi-requirement role description.\n        lexical_query = " | ".join(sorted(terms)[:60])
         if not lexical_query and query_embedding is None:
             return []
         parameters: dict[str, Any] = {
@@ -237,7 +237,7 @@ class ConsultantEvidenceRetriever:
         statement = text(
             "SELECT person_id, evidence_type, evidence_id, content, "
             "ts_rank_cd(to_tsvector('simple', content), "
-            "plainto_tsquery('simple', :query)) AS lexical, "
+            "to_tsquery('simple', :query)) AS lexical, "
             + vector_expression + " AS semantic "
             "FROM consultant_evidence_index "
             "WHERE organization_id=:org "
