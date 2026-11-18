@@ -1,0 +1,35 @@
+name: RAG shadow validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/rag-shadow-validation.yml'
+  push:
+    branches: [feature/rag-shadow-retrieval-phase1]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/rag-shadow-validation.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend with test tooling
+        run: python -m pip install -e '.[dev]'
+      - name: Ruff (RAG changes)
+        run: ruff check app/services/consultant_retrieval.py app/services/opportunities.py app/core/opportunity_config.py tests/unit/test_consultant_retrieval.py
+      - name: Unit regressions
+        run: python -m pytest -q tests/unit/test_consultant_retrieval.py tests/unit/test_opportunity_matching_stability.py tests/unit/test_opportunity_chunk_safety.py
+      - name: Python compilation
+        run: python -m compileall -q app/services/consultant_retrieval.py app/services/opportunities.py
