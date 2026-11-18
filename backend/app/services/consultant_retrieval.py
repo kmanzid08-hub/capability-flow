@@ -226,32 +226,44 @@ class ConsultantEvidenceRetriever:
         if not lexical_query and query_embedding is None:
             return []
         parameters: dict[str, Any] = {
-            "org": self.organization_id, "query": lexical_query, "limit": limit * 8,
+            "org": self.organization_id, "query": lexical_query, "limit": limit,
         }
-        vector_expression = "0.0"
         if query_embedding is not None:
             parameters["embedding"] = (
                 "[" + ",".join(f"{float(v):.8f}" for v in query_embedding) + "]"
             )
-            vector_expression = (
-                "CASE WHEN embedding IS NULL THEN 0.0 ELSE "
-                "GREATEST(0.0, 1.0 - (embedding <=> CAST(:embedding AS vector))) END"
+        # First rank evidence inside each person's records, then rank persons.
+        # A global evidence-level LIMIT could otherwise exclude a qualified
+        # consultant whose many relevant records are dominated by another CV.
+        lexical_expression = (
+            "ts_rank_cd(to_tsvector('simple', e.content), "
+            "to_tsquery('simple', :query))"
+        )
+        semantic_expression = "0.0"
+        if query_embedding is not None:
+            semantic_expression = (
+                "CASE WHEN e.embedding IS NULL THEN 0.0 ELSE "
+                "GREATEST(0.0, 1.0 - (e.embedding <=> CAST(:embedding AS vector))) END"
             )
+        score_expression = f"({lexical_expression} + {semantic_expression})"
         statement = text(
-            "SELECT person_id, evidence_type, evidence_id, content, "
-            "ts_rank_cd(to_tsvector('simple', content), "
-            "to_tsquery('simple', :query)) AS lexical, "
-            + vector_expression + " AS semantic "
-            "FROM consultant_evidence_index "
-            "WHERE organization_id=:org "
-            "ORDER BY (ts_rank_cd(to_tsvector('simple', content), "
-            "to_tsquery('simple', :query)) + "
-            + vector_expression + ") DESC LIMIT :limit"
+            "WITH scored AS ("
+            "SELECT e.person_id, e.evidence_type, e.evidence_id, e.content, "
+            + score_expression + " AS score, "
+            "ROW_NUMBER() OVER (PARTITION BY e.person_id ORDER BY "
+            + score_expression + " DESC, e.evidence_id) AS person_rank "
+            "FROM consultant_evidence_index e "
+            "JOIN people p ON p.id=e.person_id AND p.organization_id=e.organization_id "
+            "WHERE e.organization_id=:org AND p.profile_status != 'ARCHIVED'"
+            ") "
+            "SELECT person_id, evidence_type, evidence_id, content, score "
+            "FROM scored WHERE person_rank=1 AND score > 0 "
+            "ORDER BY score DESC, person_id LIMIT :limit"
         )
         results = await self.session.execute(statement, parameters)
         best: dict[uuid.UUID, RetrievalHit] = {}
         for row in results:
-            score = float(row.lexical or 0) + float(row.semantic or 0)
+            score = float(row.score or 0)
             if score <= 0:
                 continue
             hit = RetrievalHit(row.person_id, score, row.evidence_type, row.evidence_id,
