@@ -51,6 +51,8 @@ jobs:
       - name: Unit regressions
         run: python -m pytest -q tests/unit/test_consultant_retrieval.py tests/unit/test_opportunity_matching_stability.py tests/unit/test_opportunity_chunk_safety.py tests/integration/test_rag_pgvector.py
       - name: Full backend suite
+        env:
+          GEMINI_API_KEY: ci-mocked-provider-key
         run: python -m pytest -q
       - name: Python compilation
         run: python -m compileall -q app/services/consultant_retrieval.py app/services/opportunities.py
