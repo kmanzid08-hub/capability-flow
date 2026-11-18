@@ -47,6 +47,13 @@ class OpportunityIntelligenceSettings(BaseSettings):
         ge=5,
         le=500,
     )
+    # Phase 1 RAG is shadow-only; old rankings remain authoritative.
+    rag_shadow_enabled: bool = False
+    rag_embedding_api_key: str | None = None
+    rag_embedding_model: str = "text-embedding-3-small"
+    rag_shadow_limit: int = Field(default=100, ge=10, le=500)
+    rag_embedding_batch_size: int = Field(default=32, ge=1, le=100)
+
     opportunity_default_team_options: int = Field(
         default=3,
         ge=1,
