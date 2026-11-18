@@ -56,7 +56,6 @@ from app.services.source_ingestion import (
 )
 from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer, TeamOption
 
-
 logger = logging.getLogger(__name__)
 
 
