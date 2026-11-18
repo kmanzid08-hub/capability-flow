@@ -15,6 +15,23 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: rag_test
+          POSTGRES_PASSWORD: rag_test
+          POSTGRES_DB: rag_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd 'pg_isready -U rag_test -d rag_test'
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://rag_test:rag_test@localhost:5432/rag_test
+      RAG_TEST_DATABASE_URL: postgresql+psycopg_async://rag_test:rag_test@localhost:5432/rag_test
     defaults:
       run:
         working-directory: backend
@@ -29,7 +46,11 @@ jobs:
         run: python -m pip install -e '.[dev]'
       - name: Ruff (RAG changes)
         run: ruff check app/services/consultant_retrieval.py app/services/opportunities.py app/core/opportunity_config.py tests/unit/test_consultant_retrieval.py
+      - name: Apply PostgreSQL migrations
+        run: python -m alembic upgrade head
       - name: Unit regressions
-        run: python -m pytest -q tests/unit/test_consultant_retrieval.py tests/unit/test_opportunity_matching_stability.py tests/unit/test_opportunity_chunk_safety.py
+        run: python -m pytest -q tests/unit/test_consultant_retrieval.py tests/unit/test_opportunity_matching_stability.py tests/unit/test_opportunity_chunk_safety.py tests/integration/test_rag_pgvector.py
+      - name: Full backend suite
+        run: python -m pytest -q
       - name: Python compilation
         run: python -m compileall -q app/services/consultant_retrieval.py app/services/opportunities.py
