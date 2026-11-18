@@ -245,7 +245,7 @@ class ConsultantEvidenceRetriever:
             "FROM consultant_evidence_index "
             "WHERE organization_id=:org "
             "ORDER BY (ts_rank_cd(to_tsvector('simple', content), "
-            "plainto_tsquery('simple', :query)) + "
+            "to_tsquery('simple', :query)) + "
             + vector_expression + ") DESC LIMIT :limit"
         )
         results = await self.session.execute(statement, parameters)
