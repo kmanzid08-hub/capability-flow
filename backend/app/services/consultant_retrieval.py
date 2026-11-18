@@ -220,7 +220,9 @@ class ConsultantEvidenceRetriever:
         if query_embedding is not None and len(query_embedding) != 1536:
             raise ValueError("Expected 1536-dimensional query embedding")
         terms = query_terms(query)
-        # OR rather than AND: one evidence entry should not need to contain every\n        # qualification from a multi-requirement role description.\n        lexical_query = " | ".join(sorted(terms)[:60])
+        # OR rather than AND: one evidence entry should not need to contain every
+        # qualification from a multi-requirement role description.
+        lexical_query = " | ".join(sorted(terms)[:60])
         if not lexical_query and query_embedding is None:
             return []
         parameters: dict[str, Any] = {
@@ -228,7 +230,9 @@ class ConsultantEvidenceRetriever:
         }
         vector_expression = "0.0"
         if query_embedding is not None:
-            parameters["embedding"] = "[" + ",".join(f"{float(v):.8f}" for v in query_embedding) + "]"
+            parameters["embedding"] = (
+                "[" + ",".join(f"{float(v):.8f}" for v in query_embedding) + "]"
+            )
             vector_expression = (
                 "CASE WHEN embedding IS NULL THEN 0.0 ELSE "
                 "GREATEST(0.0, 1.0 - (embedding <=> CAST(:embedding AS vector))) END"
