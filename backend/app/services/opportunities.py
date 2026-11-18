@@ -950,6 +950,12 @@ class OpportunityService:
                             query,
                             limit=self.settings.rag_shadow_limit,
                             query_embedding=embedding,
+                            embedding_model=(
+                                f"{self.settings.rag_embedding_provider}:"
+                                f"{self.settings.rag_embedding_model}"
+                                if embedding is not None
+                                else None
+                            ),
                         )
                         baseline = [evaluation.person.id for evaluation in evaluations[:25]]
                         found, total = summarize_shadow_recall(
