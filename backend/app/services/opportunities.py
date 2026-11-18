@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
+from app.core.config import get_settings
 from app.core.opportunity_config import get_opportunity_intelligence_settings
 from app.db.session import AsyncSessionLocal
 from app.models.opportunity import (
@@ -863,6 +864,9 @@ class OpportunityService:
         await self.session.commit()
 
         rag_shadow_ready = False
+        embedding_key = self.settings.rag_embedding_api_key
+        if not embedding_key and self.settings.rag_embedding_provider == "gemini":
+            embedding_key = get_settings().gemini_api_key
         if self.settings.rag_shadow_enabled:
             # Shadow index maintenance uses a separate transaction so failures
             # cannot interrupt opportunity analysis or matching.
@@ -871,11 +875,13 @@ class OpportunityService:
                     retriever = ConsultantEvidenceRetriever(rag_session, self.organization_id)
                     refreshed = await retriever.refresh(profiles)
                     await rag_session.commit()
-                    if self.settings.rag_embedding_api_key:
+                    if embedding_key:
                         await retriever.embed_missing(
-                            api_key=self.settings.rag_embedding_api_key,
+                            api_key=embedding_key,
                             model=self.settings.rag_embedding_model,
+                            provider=self.settings.rag_embedding_provider,
                             batch_size=self.settings.rag_embedding_batch_size,
+                            max_batches=self.settings.rag_embedding_max_batches_per_analysis,
                         )
                     rag_shadow_ready = True
                     logger.info(
@@ -933,11 +939,12 @@ class OpportunityService:
                             rag_session, self.organization_id
                         )
                         embedding = None
-                        if self.settings.rag_embedding_api_key:
+                        if embedding_key:
                             embedding = await retriever.embed_query(
                                 query,
-                                api_key=self.settings.rag_embedding_api_key,
+                                api_key=embedding_key,
                                 model=self.settings.rag_embedding_model,
+                                provider=self.settings.rag_embedding_provider,
                             )
                         hits = await retriever.retrieve(
                             query,
