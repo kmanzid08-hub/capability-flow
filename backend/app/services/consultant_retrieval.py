@@ -162,19 +162,19 @@ class ConsultantEvidenceRetriever:
                     task_type=task,
                     **({"title": "Consultant evidence"} if task == "RETRIEVAL_DOCUMENT" else {}),
                 )
-                response = await client.models.embed_content(
+                gemini_response = await client.models.embed_content(
                     model=model,
                     contents=cast(Any, texts),
                     config=config,
                 )
-            vectors = [item.values for item in (response.embeddings or [])]
+            vectors = [item.values for item in (gemini_response.embeddings or [])]
         elif provider == "openai":
             openai_client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
-            response = await openai_client.embeddings.create(
+            openai_response = await openai_client.embeddings.create(
                 model=model, input=texts, dimensions=1536,
             )
             vectors = [
-                item.embedding for item in sorted(response.data, key=lambda item: item.index)
+                item.embedding for item in sorted(openai_response.data, key=lambda item: item.index)
             ]
         else:
             raise ValueError("Unsupported RAG embedding provider")
