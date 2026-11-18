@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +48,15 @@ class OpportunityIntelligenceSettings(BaseSettings):
         ge=5,
         le=500,
     )
+    # Phase 1 RAG is shadow-only; old rankings remain authoritative.
+    rag_shadow_enabled: bool = False
+    rag_embedding_api_key: str | None = None
+    rag_embedding_provider: Literal["gemini", "openai"] = "gemini"
+    rag_embedding_model: str = "gemini-embedding-001"
+    rag_shadow_limit: int = Field(default=100, ge=10, le=500)
+    rag_embedding_batch_size: int = Field(default=8, ge=1, le=100)
+    rag_embedding_max_batches_per_analysis: int = Field(default=2, ge=0, le=100)
+
     opportunity_default_team_options: int = Field(
         default=3,
         ge=1,

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
+from app.core.config import get_settings
 from app.core.opportunity_config import get_opportunity_intelligence_settings
+from app.db.session import AsyncSessionLocal
 from app.models.opportunity import (
     CandidateMatch,
     CapabilityGap,
@@ -35,6 +38,7 @@ from app.models.opportunity_enums import (
 from app.repositories.opportunities import OpportunityRepository
 from app.schemas.opportunity import ExtractedOpportunity, OpportunityCreate, OpportunityUpdate
 from app.services.ai_jobs import AIJobService
+from app.services.consultant_retrieval import ConsultantEvidenceRetriever, summarize_shadow_recall
 from app.services.matching import CandidateEvaluation, MatchingEngine, PersonProfile
 from app.services.opportunity_metadata import suggest_metadata
 from app.services.opportunity_source_storage import OpportunitySourceStorage
@@ -52,6 +56,8 @@ from app.services.source_ingestion import (
     SourceIngestionError,
 )
 from app.services.team_optimizer import RoleCandidateSet, TeamAssignment, TeamOptimizer, TeamOption
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -857,6 +863,47 @@ class OpportunityService:
         # CPU-heavy matching so PostgreSQL cannot kill it as idle-in-transaction.
         await self.session.commit()
 
+        rag_shadow_ready = False
+        embedding_key = self.settings.rag_embedding_api_key
+        if not embedding_key and self.settings.rag_embedding_provider == "gemini":
+            embedding_key = get_settings().gemini_api_key
+        if self.settings.rag_shadow_enabled:
+            # Shadow index maintenance uses a separate transaction so failures
+            # cannot interrupt opportunity analysis or matching.
+            try:
+                async with AsyncSessionLocal() as rag_session:
+                    retriever = ConsultantEvidenceRetriever(rag_session, self.organization_id)
+                    refreshed = await retriever.refresh(profiles)
+                    await rag_session.commit()
+                    rag_shadow_ready = True
+                    if embedding_key:
+                        try:
+                            embedded = await asyncio.wait_for(
+                                retriever.embed_missing(
+                                    api_key=embedding_key,
+                                    model=self.settings.rag_embedding_model,
+                                    provider=self.settings.rag_embedding_provider,
+                                    batch_size=self.settings.rag_embedding_batch_size,
+                                    max_batches=self.settings.rag_embedding_max_batches_per_analysis,
+                                ),
+                                timeout=25.0,
+                            )
+                            logger.info("RAG shadow embeddings updated: count=%s", embedded)
+                        except Exception:
+                            # An embedding quota failure must never prevent lexical
+                            # shadow measurements or the deterministic matching run.
+                            embedding_key = None
+                            logger.warning(
+                                "RAG embedding unavailable; using lexical shadow retrieval",
+                                exc_info=True,
+                            )
+                    logger.info(
+                        "RAG shadow evidence index refreshed: organization=%s records=%s",
+                        self.organization_id, refreshed,
+                    )
+            except Exception:
+                logger.exception("RAG shadow index failed; baseline matching remains active")
+
         role_sets: list[RoleCandidateSet] = []
         top_scores: list[float] = []
         best_unverified_by_role: dict[uuid.UUID, bool] = {}
@@ -882,6 +929,76 @@ class OpportunityService:
                     await asyncio.sleep(0)
 
             _retain_top_candidate_evaluations(evaluations, candidate_limit)
+            if rag_shadow_ready:
+                try:
+                    query = " ".join(
+                        [role.title]
+                        + [
+                            " ".join(
+                                filter(
+                                    None,
+                                    [
+                                        req.label,
+                                        req.normalized_value,
+                                        " ".join(req.values_json or []),
+                                    ],
+                                )
+                            )
+                            for req in requirements
+                        ]
+                    )
+                    async with AsyncSessionLocal() as rag_session:
+                        retriever = ConsultantEvidenceRetriever(
+                            rag_session, self.organization_id
+                        )
+                        embedding = None
+                        if embedding_key:
+                            try:
+                                embedding = await asyncio.wait_for(
+                                    retriever.embed_query(
+                                        query,
+                                        api_key=embedding_key,
+                                        model=self.settings.rag_embedding_model,
+                                        provider=self.settings.rag_embedding_provider,
+                                    ),
+                                    timeout=15.0,
+                                )
+                            except Exception:
+                                embedding_key = None
+                                logger.warning(
+                                    "RAG query embedding unavailable; continuing lexically",
+                                    exc_info=True,
+                                )
+                        hits = await retriever.retrieve(
+                            query,
+                            limit=self.settings.rag_shadow_limit,
+                            query_embedding=embedding,
+                            embedding_model=(
+                                f"{self.settings.rag_embedding_provider}:"
+                                f"{self.settings.rag_embedding_model}"
+                                if embedding is not None
+                                else None
+                            ),
+                        )
+                        baseline = [evaluation.person.id for evaluation in evaluations[:25]]
+                        found, total = summarize_shadow_recall(
+                            baseline, {hit.person_id for hit in hits}
+                        )
+                        logger.info(
+                            "RAG shadow comparison: opportunity=%s role=%s "
+                            "baseline_top=%s retrieved=%s recall=%s/%s",
+                            opportunity.id,
+                            role.id,
+                            total,
+                            len(hits),
+                            found,
+                            total,
+                        )
+                except Exception:
+                    logger.exception(
+                        "RAG shadow retrieval failed: opportunity=%s role=%s",
+                        opportunity.id, role.id,
+                    )
             persisted: list[tuple[CandidateMatch, CandidateEvaluation]] = []
             for rank, evaluation in enumerate(evaluations, start=1):
                 match = CandidateMatch(
