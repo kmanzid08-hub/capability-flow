@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from google import genai
+from google.genai import types
 from openai import AsyncOpenAI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,41 +139,87 @@ class ConsultantEvidenceRetriever:
                 )
         return count
 
+    @staticmethod
+    async def _embeddings(
+        texts: list[str],
+        *,
+        api_key: str,
+        provider: str,
+        model: str,
+        task: str,
+    ) -> list[list[float]]:
+        if provider == "gemini":
+            async with genai.Client(api_key=api_key).aio as client:
+                config = types.EmbedContentConfig(
+                    output_dimensionality=1536,
+                    task_type=task,
+                    **({"title": "Consultant evidence"} if task == "RETRIEVAL_DOCUMENT" else {}),
+                )
+                response = await client.models.embed_content(
+                    model=model,
+                    contents=texts,
+                    config=config,
+                )
+            vectors = [item.values for item in (response.embeddings or [])]
+        elif provider == "openai":
+            client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
+            response = await client.embeddings.create(
+                model=model, input=texts, dimensions=1536,
+            )
+            vectors = [
+                item.embedding for item in sorted(response.data, key=lambda item: item.index)
+            ]
+        else:
+            raise ValueError("Unsupported RAG embedding provider")
+
+        if len(vectors) != len(texts) or any(
+            vector is None or len(vector) != 1536 for vector in vectors
+        ):
+            raise ValueError("Embedding provider returned an invalid vector count or dimension")
+        return [list(vector) for vector in vectors if vector is not None]
+
     async def embed_missing(
         self,
         *,
         api_key: str,
-        model: str = "text-embedding-3-small",
-        batch_size: int = 32,
+        model: str = "gemini-embedding-001",
+        provider: str = "gemini",
+        batch_size: int = 8,
+        max_batches: int = 2,
     ) -> int:
-        """Index only missing vectors. Explicit opt-in key prevents surprise billing."""
-        client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
+        """Bounded per-analysis backfill, with no charges unless shadow is enabled."""
+        if max_batches <= 0:
+            return 0
+        model_id = f"{provider}:{model}"
         result = await self.session.execute(
             text(
                 "SELECT person_id, evidence_type, evidence_id, content "
                 "FROM consultant_evidence_index "
                 "WHERE organization_id=:org "
                 "AND (embedding IS NULL OR embedding_model != :model) "
-                "ORDER BY person_id, evidence_type, evidence_id"
+                "ORDER BY person_id, evidence_type, evidence_id "
+                "LIMIT :limit"
             ),
-            {"org": self.organization_id, "model": model},
+            {
+                "org": self.organization_id,
+                "model": model_id,
+                "limit": batch_size * max_batches,
+            },
         )
         rows = list(result)
         await self.session.commit()
         completed = 0
         for offset in range(0, len(rows), batch_size):
             batch = rows[offset : offset + batch_size]
-            response = await client.embeddings.create(
-                model=model, input=[item.content for item in batch],
-                dimensions=1536,
+            vectors = await self._embeddings(
+                [item.content for item in batch],
+                api_key=api_key,
+                provider=provider,
+                model=model,
+                task="RETRIEVAL_DOCUMENT",
             )
-            vectors = sorted(response.data, key=lambda item: item.index)
-            if len(vectors) != len(batch):
-                raise ValueError("Embedding provider returned the wrong number of vectors")
             for item, vector in zip(batch, vectors, strict=True):
-                if len(vector.embedding) != 1536:
-                    raise ValueError("Embedding dimension mismatch")
-                literal = "[" + ",".join(str(v) for v in vector.embedding) + "]"
+                literal = "[" + ",".join(str(value) for value in vector) + "]"
                 await self.session.execute(
                     text(
                         "UPDATE consultant_evidence_index "
@@ -184,7 +232,7 @@ class ConsultantEvidenceRetriever:
                     {
                         "org": self.organization_id, "person": item.person_id,
                         "kind": item.evidence_type, "evidence": item.evidence_id,
-                        "model": model, "embedding": literal,
+                        "model": model_id, "embedding": literal,
                     },
                 )
                 completed += 1
@@ -193,16 +241,20 @@ class ConsultantEvidenceRetriever:
 
     @staticmethod
     async def embed_query(
-        query: str, *, api_key: str, model: str = "text-embedding-3-small"
+        query: str,
+        *,
+        api_key: str,
+        model: str = "gemini-embedding-001",
+        provider: str = "gemini",
     ) -> list[float]:
-        client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=1)
-        response = await client.embeddings.create(
-            model=model, input=query[:8000], dimensions=1536
+        vectors = await ConsultantEvidenceRetriever._embeddings(
+            [query[:8000]],
+            api_key=api_key,
+            provider=provider,
+            model=model,
+            task="RETRIEVAL_QUERY",
         )
-        vector = response.data[0].embedding
-        if len(vector) != 1536:
-            raise ValueError("Embedding dimension mismatch")
-        return vector
+        return vectors[0]
 
     async def retrieve(
         self,
