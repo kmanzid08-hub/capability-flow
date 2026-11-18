@@ -262,6 +262,7 @@ class ConsultantEvidenceRetriever:
         *,
         limit: int = 100,
         query_embedding: list[float] | None = None,
+        embedding_model: str | None = None,
     ) -> list[RetrievalHit]:
         """Lexical + optional pgvector exact cosine distance, deduplicated by person.
 
@@ -293,8 +294,16 @@ class ConsultantEvidenceRetriever:
         )
         semantic_expression = "0.0"
         if query_embedding is not None:
+            if embedding_model is not None:
+                parameters["embedding_model"] = embedding_model
             semantic_expression = (
-                "CASE WHEN e.embedding IS NULL THEN 0.0 ELSE "
+                "CASE WHEN e.embedding IS NULL "
+                + (
+                    "OR e.embedding_model IS DISTINCT FROM :embedding_model "
+                    if embedding_model is not None
+                    else ""
+                )
+                + "THEN 0.0 ELSE "
                 "GREATEST(0.0, 1.0 - (e.embedding <=> CAST(:embedding AS vector))) END"
             )
         score_expression = f"({lexical_expression} + {semantic_expression})"
