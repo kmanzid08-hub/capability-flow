@@ -875,15 +875,28 @@ class OpportunityService:
                     retriever = ConsultantEvidenceRetriever(rag_session, self.organization_id)
                     refreshed = await retriever.refresh(profiles)
                     await rag_session.commit()
-                    if embedding_key:
-                        await retriever.embed_missing(
-                            api_key=embedding_key,
-                            model=self.settings.rag_embedding_model,
-                            provider=self.settings.rag_embedding_provider,
-                            batch_size=self.settings.rag_embedding_batch_size,
-                            max_batches=self.settings.rag_embedding_max_batches_per_analysis,
-                        )
                     rag_shadow_ready = True
+                    if embedding_key:
+                        try:
+                            embedded = await asyncio.wait_for(
+                                retriever.embed_missing(
+                                    api_key=embedding_key,
+                                    model=self.settings.rag_embedding_model,
+                                    provider=self.settings.rag_embedding_provider,
+                                    batch_size=self.settings.rag_embedding_batch_size,
+                                    max_batches=self.settings.rag_embedding_max_batches_per_analysis,
+                                ),
+                                timeout=25.0,
+                            )
+                            logger.info("RAG shadow embeddings updated: count=%s", embedded)
+                        except Exception:
+                            # An embedding quota failure must never prevent lexical
+                            # shadow measurements or the deterministic matching run.
+                            embedding_key = None
+                            logger.warning(
+                                "RAG embedding unavailable; using lexical shadow retrieval",
+                                exc_info=True,
+                            )
                     logger.info(
                         "RAG shadow evidence index refreshed: organization=%s records=%s",
                         self.organization_id, refreshed,
@@ -940,12 +953,22 @@ class OpportunityService:
                         )
                         embedding = None
                         if embedding_key:
-                            embedding = await retriever.embed_query(
-                                query,
-                                api_key=embedding_key,
-                                model=self.settings.rag_embedding_model,
-                                provider=self.settings.rag_embedding_provider,
-                            )
+                            try:
+                                embedding = await asyncio.wait_for(
+                                    retriever.embed_query(
+                                        query,
+                                        api_key=embedding_key,
+                                        model=self.settings.rag_embedding_model,
+                                        provider=self.settings.rag_embedding_provider,
+                                    ),
+                                    timeout=15.0,
+                                )
+                            except Exception:
+                                embedding_key = None
+                                logger.warning(
+                                    "RAG query embedding unavailable; continuing lexically",
+                                    exc_info=True,
+                                )
                         hits = await retriever.retrieve(
                             query,
                             limit=self.settings.rag_shadow_limit,
