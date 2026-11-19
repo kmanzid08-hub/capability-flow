@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import BinaryIO
 
@@ -487,42 +489,51 @@ class OpportunityService:
                 f"Opportunity document exceeds {limit_mb} MB",
             )
 
-        try:
-            ingested = await run_in_threadpool(
-                self.ingestion.from_fileobj,
-                upload.file,
-                filename,
-                mime_type,
-                file_size,
+        # Document parsers may close the file object they receive (notably
+        # DOCX/ZIP readers). Preserve an independent upload snapshot so the
+        # subsequent object-storage copy never seeks a closed upload stream.
+        with tempfile.TemporaryDirectory(prefix="cf-source-") as temp_dir:
+            snapshot = Path(temp_dir) / "source-upload"
+            await run_in_threadpool(self.source_storage._copy_stream, upload.file, snapshot)
+            try:
+                with snapshot.open("rb") as ingestion_stream:
+                    ingested = await run_in_threadpool(
+                        self.ingestion.from_fileobj,
+                        ingestion_stream,
+                        filename,
+                        mime_type,
+                        file_size,
+                    )
+            except SourceIngestionError as exc:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    str(exc),
+                ) from exc
+
+            existing = await self._existing_source_by_hash(
+                opportunity_id, ingested.content_hash
             )
-        except SourceIngestionError as exc:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                str(exc),
-            ) from exc
+            if existing is not None:
+                return existing
 
-        existing = await self._existing_source_by_hash(opportunity_id, ingested.content_hash)
-        if existing is not None:
-            return existing
+            suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else "other"
+            source_type = {
+                "pdf": OpportunitySourceType.PDF,
+                "docx": OpportunitySourceType.DOCX,
+                "xlsx": OpportunitySourceType.XLSX,
+                "xlsm": OpportunitySourceType.XLSX,
+                "pptx": OpportunitySourceType.PPTX,
+            }.get(suffix, OpportunitySourceType.OTHER)
 
-        suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else "other"
-        source_type = {
-            "pdf": OpportunitySourceType.PDF,
-            "docx": OpportunitySourceType.DOCX,
-            "xlsx": OpportunitySourceType.XLSX,
-            "xlsm": OpportunitySourceType.XLSX,
-            "pptx": OpportunitySourceType.PPTX,
-        }.get(suffix, OpportunitySourceType.OTHER)
-
-        await upload.seek(0)
-        stored_filename, storage_path = await self.source_storage.store_fileobj(
-            organization_id=self.organization_id,
-            opportunity_id=opportunity_id,
-            source=upload.file,
-            filename=filename,
-            file_size=file_size,
-            mime_type=mime_type or ingested.mime_type,
-        )
+            with snapshot.open("rb") as storage_stream:
+                stored_filename, storage_path = await self.source_storage.store_fileobj(
+                    organization_id=self.organization_id,
+                    opportunity_id=opportunity_id,
+                    source=storage_stream,
+                    filename=filename,
+                    file_size=file_size,
+                    mime_type=mime_type or ingested.mime_type,
+                )
 
         source = OpportunitySource(
             organization_id=self.organization_id,
