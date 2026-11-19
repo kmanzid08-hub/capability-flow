@@ -1,4 +1,7 @@
+from io import BytesIO
 from unittest.mock import AsyncMock, patch
+
+from docx import Document
 
 from httpx import AsyncClient
 
@@ -315,3 +318,36 @@ async def test_file_intake_stores_downloadable_snapshot(client: AsyncClient) -> 
         headers=headers(registration),
     )
     assert removed.status_code == 204
+
+
+async def test_docx_intake_survives_parser_closing_its_stream(client: AsyncClient) -> None:
+    """Regression: DOCX ingestion must not close the source storage stream."""
+    registration = await register(client, "docx-stream")
+    document = Document()
+    document.add_paragraph(
+        "Terms of reference for a financial audit of a cooling initiative. "
+        "The consultant must be an accredited auditor with five years of experience."
+    )
+    buffer = BytesIO()
+    document.save(buffer)
+    response = await client.post(
+        "/api/v1/opportunities/intake/file",
+        headers=headers(registration),
+        files={
+            "file": (
+                "RFP AUDIT FOR RWANDA COOLING INITIATIVE.docx",
+                buffer.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert response.status_code == 201, response.text
+    data = response.json()
+    assert data["source"]["source_type"] == "docx"
+    assert data["source"]["file_size"] > 0
+    sources = await client.get(
+        f"/api/v1/opportunities/{data['opportunity']['id']}/sources",
+        headers=headers(registration),
+    )
+    assert sources.status_code == 200
+    assert len(sources.json()) == 1
