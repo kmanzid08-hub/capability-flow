@@ -351,3 +351,60 @@ async def test_docx_intake_survives_parser_closing_its_stream(client: AsyncClien
     )
     assert sources.status_code == 200
     assert len(sources.json()) == 1
+
+
+async def test_analysis_retry_reuses_verified_chunks_after_provider_outage(
+    client: AsyncClient,
+) -> None:
+    """A later attempt must not spend quota analyzing successful document parts."""
+    from fastapi import HTTPException
+    from app.db.session import get_db
+    from app.main import app
+    from app.models.opportunity import OpportunityAnalysis
+    from app.models.opportunity_enums import AnalysisStatus
+    from sqlalchemy import select
+
+    registration = await register(client, "checkpoint-retry")
+    created = await client.post(
+        "/api/v1/opportunities",
+        headers=headers(registration),
+        json={"title": "Detailed consultancy request"},
+    )
+    assert created.status_code == 201
+    opportunity_id = created.json()["id"]
+    response = await client.post(
+        f"/api/v1/opportunities/{opportunity_id}/sources/text",
+        headers=headers(registration),
+        json={"text": "Mandatory audit qualification and relevant experience. " * 100},
+    )
+    assert response.status_code == 201
+
+    calls = []
+    attempts = [0]
+
+    async def fake_extract(self, source, *, completed_chunks=None, on_chunk_completed=None):
+        attempts[0] += 1
+        calls.append(set((completed_chunks or {}).keys()))
+        first = ExtractedOpportunity(summary="Previously verified evidence", roles=[])
+        if attempts[0] == 1:
+            assert on_chunk_completed is not None
+            await on_chunk_completed(1, [first])
+            raise __import__(
+                "app.services.requirement_extraction", fromlist=["RequirementExtractionError"]
+            ).RequirementExtractionError("All AI providers unavailable")
+        assert 1 in completed_chunks
+        return ExtractedOpportunity(summary="Tender evaluated with resumed evidence", roles=[])
+
+    from app.services.requirement_extraction import GeminiRequirementExtractor
+    with patch.object(GeminiRequirementExtractor, "extract", new=fake_extract):
+        first_response = await client.post(
+            f"/api/v1/opportunities/{opportunity_id}/analyze",
+            headers=headers(registration),
+        )
+        assert first_response.status_code == 503
+        second_response = await client.post(
+            f"/api/v1/opportunities/{opportunity_id}/analyze",
+            headers=headers(registration),
+        )
+    assert second_response.status_code == 200, second_response.text
+    assert calls == [set(), {1}]
