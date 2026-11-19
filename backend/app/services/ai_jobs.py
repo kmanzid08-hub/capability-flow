@@ -326,6 +326,40 @@ class AIJobQueueService:
                 self.settings.ai_job_retry_max_seconds,
                 self.settings.ai_job_retry_base_seconds * (2 ** max(job.attempt_count - 1, 0)),
             )
+            if (
+                job.job_type == AIJobType.OPPORTUNITY_ANALYSIS
+                and code == "http_503"
+                and "All configured AI providers are currently unavailable" in message
+            ):
+                # If all fallbacks are cooling down, a 5-second retry only
+                # wastes another job attempt. Persist the next provider
+                # availability time so a restart won't cause early retries.
+                from app.services.ai_provider_health import get_provider_health
+
+                configured = {
+                    "gemini": bool(self.settings.gemini_api_key),
+                    "groq": bool(self.settings.groq_api_key),
+                    "openrouter": bool(self.settings.openrouter_api_key),
+                    "openai": bool(self.settings.openai_api_key),
+                }
+                next_probe = [
+                    snapshot.opened_until
+                    for snapshot in get_provider_health().snapshots()
+                    if (
+                        configured.get(snapshot.provider, False)
+                        and snapshot.status == "cooldown"
+                        and snapshot.opened_until is not None
+                        and snapshot.opened_until > now
+                    )
+                ]
+                if next_probe:
+                    delay = max(
+                        delay,
+                        min(
+                            86_400,
+                            int((min(next_probe) - now).total_seconds()) + 20,
+                        ),
+                    )
             job.status = AIJobStatus.RETRYING
             job.available_at = now + timedelta(seconds=delay)
             job.heartbeat_at = None
