@@ -729,7 +729,9 @@ class OpportunityService:
         await self.session.commit()
         try:
             extractor = GeminiRequirementExtractor()
-            capped_source = source_text[: extractor.opportunity_settings.opportunity_max_source_characters]
+            capped_source = source_text[
+                : extractor.opportunity_settings.opportunity_max_source_characters
+            ]
             expected_hash = hashlib.sha256(capped_source.encode("utf-8")).hexdigest()
             chunks_count = len(extractor._chunk_source(capped_source))
             cached_parts: dict[int, list[ExtractedOpportunity]] = {}
