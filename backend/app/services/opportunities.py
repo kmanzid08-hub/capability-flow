@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import tempfile
 import uuid
@@ -704,6 +705,9 @@ class OpportunityService:
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "Add a readable source before analysis",
                 )
+        # A previous failed analysis can contain fully verified chunks of this
+        # exact tender. Never mix results from a changed document or chunk size.
+        previous = await self.repo.latest_analysis(opportunity_id)
         version = await self.repo.next_analysis_version(opportunity_id)
         analysis = OpportunityAnalysis(
             organization_id=self.organization_id,
@@ -725,7 +729,62 @@ class OpportunityService:
         await self.session.commit()
         try:
             extractor = GeminiRequirementExtractor()
-            extracted = await extractor.extract(source_text)
+            capped_source = source_text[
+                : extractor.opportunity_settings.opportunity_max_source_characters
+            ]
+            expected_hash = hashlib.sha256(capped_source.encode("utf-8")).hexdigest()
+            chunks_count = len(extractor._chunk_source(capped_source))
+            cached_parts: dict[int, list[ExtractedOpportunity]] = {}
+            if (
+                previous is not None
+                and previous.status == AnalysisStatus.FAILED
+                and isinstance(previous.extracted_metadata, dict)
+            ):
+                checkpoint = previous.extracted_metadata.get("_chunk_checkpoint")
+                if (
+                    isinstance(checkpoint, dict)
+                    and checkpoint.get("source_sha256") == expected_hash
+                    and checkpoint.get("chunk_count") == chunks_count
+                    and isinstance(checkpoint.get("parts"), dict)
+                ):
+                    for raw_index, payload in checkpoint["parts"].items():
+                        try:
+                            index = int(raw_index)
+                            if not 1 <= index <= chunks_count or not isinstance(payload, list):
+                                continue
+                            cached_parts[index] = [
+                                ExtractedOpportunity.model_validate(part)
+                                for part in payload
+                            ]
+                        except (ValueError, TypeError):
+                            continue
+            checkpoint_parts: dict[str, list[dict[str, object]]] = {
+                str(index): [part.model_dump(mode="json") for part in group]
+                for index, group in cached_parts.items()
+            }
+
+            async def checkpoint_complete(
+                index: int, parts: list[ExtractedOpportunity]
+            ) -> None:
+                checkpoint_parts[str(index)] = [
+                    part.model_dump(mode="json") for part in parts
+                ]
+                analysis.extracted_metadata = {
+                    "_chunk_checkpoint": {
+                        "source_sha256": expected_hash,
+                        "chunk_count": chunks_count,
+                        "parts": checkpoint_parts,
+                    }
+                }
+                # A fresh object assignment ensures SQLAlchemy marks JSON
+                # as changed. One short DB commit per successful source chunk.
+                await self.session.commit()
+
+            extracted = await extractor.extract(
+                source_text,
+                completed_chunks=cached_parts,
+                on_chunk_completed=checkpoint_complete,
+            )
             analysis.model_name = extractor.model_name
             await self.session.commit()
             await self._persist_extracted(opportunity, analysis, extracted)
