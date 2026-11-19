@@ -260,7 +260,9 @@ class OpportunitySourceIngestionService:
                     f"Unsupported opportunity document type: {suffix or 'none'}"
                 )
         finally:
-            source.seek(0)
+            # Some ZIP-backed document readers close their input stream.
+            # The caller owns the stream; do not seek it after parsing.
+            pass
 
         return self._finish(
             text,
