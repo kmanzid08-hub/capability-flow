@@ -172,7 +172,7 @@ async def test_opportunity_retry_waits_for_provider_quota_recovery(
         openai_api_key=None,
     )
     service = AIJobService(session, organization.id, user.id, settings)
-    enqueued = await service.enqueue_opportunity(opportunity_id=opportunity.id)
+    await service.enqueue_opportunity(opportunity_id=opportunity.id)
     queue = AIJobQueueService(session, settings)
     claimed = await queue.claim_next("worker-quota")
     assert claimed is not None
