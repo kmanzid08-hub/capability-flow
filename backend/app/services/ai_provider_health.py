@@ -295,6 +295,11 @@ def _looks_daily_quota(message: str) -> bool:
             "tokens per day",
             "requests per day",
             "free-models-per-day",
+            # OpenAI account balance exhaustion is NOT a short-lived RPM limit.
+            # Do not retry every few minutes when billing credits are depleted.
+            "credit_balance_exhausted",
+            "insufficient_quota",
+            "no credits remaining",
             "tpd",
             "perdayperprojectpermodel",
             "generaterequestsperdayperprojectpermodel",
