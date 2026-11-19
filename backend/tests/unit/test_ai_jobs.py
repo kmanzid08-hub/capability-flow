@@ -152,7 +152,8 @@ async def test_opportunity_retry_waits_for_provider_quota_recovery(
         get_provider_health,
         reset_provider_health_for_tests,
     )
-    from tests.unit.test_ai_provider_health import ProviderError
+    class QuotaError(RuntimeError):
+        status_code = 429
 
     organization, user, _ = await _entities(session, uuid4().hex[:8])
     opportunity = Opportunity(
@@ -179,7 +180,7 @@ async def test_opportunity_retry_waits_for_provider_quota_recovery(
     try:
         get_provider_health().record_failure(
             "gemini",
-            ProviderError("GenerateRequestsPerDayPerProjectPerModel daily quota", 429),
+            QuotaError("GenerateRequestsPerDayPerProjectPerModel daily quota"),
         )
         result = await queue.fail_or_retry(
             claimed.id,
@@ -189,6 +190,9 @@ async def test_opportunity_retry_waits_for_provider_quota_recovery(
             retryable=True,
         )
         assert result == AIJobStatus.RETRYING
-        assert (claimed.available_at.replace(tzinfo=UTC) - datetime.now(UTC)).total_seconds() > 3_500
+        seconds_until_retry = (
+            claimed.available_at.replace(tzinfo=UTC) - datetime.now(UTC)
+        ).total_seconds()
+        assert seconds_until_retry > 3_500
     finally:
         reset_provider_health_for_tests()
