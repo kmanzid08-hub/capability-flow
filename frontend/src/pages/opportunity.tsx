@@ -538,12 +538,27 @@ export function OpportunityPage() {
                 "failed" ? (
                 <div className="mt-5 rounded-xl bg-red-50 p-4">
                   <p className="font-semibold text-red-800">
-                    Analysis failed
+                    {analysis.error_message?.includes("providers failed") ||
+                    analysis.error_message?.includes("AI providers")
+                      ? "AI services temporarily unavailable"
+                      : "Analysis failed"}
                   </p>
                   <p className="mt-2 text-sm text-red-700">
-                    {analysis.error_message ||
-                      "The requirement could not be analyzed."}
+                    {analysis.error_message?.includes("providers failed") ||
+                    analysis.error_message?.includes("AI providers")
+                      ? "Your tender and uploaded sources are safe. The AI providers have reached their current limits or were unable to complete this document. Try re-analyzing when capacity is available; newly completed sections will be saved for recovery."
+                      : analysis.error_message ||
+                        "The requirement could not be analyzed."}
                   </p>
+                  {(analysis.error_message?.includes("providers failed") ||
+                    analysis.error_message?.includes("AI providers")) && (
+                    <details className="mt-3 text-xs text-red-800/80">
+                      <summary className="cursor-pointer font-medium">
+                        Technical details
+                      </summary>
+                      <p className="mt-2">{analysis.error_message}</p>
+                    </details>
+                  )}
                 </div>
               ) : analysis ? (
                 <>
