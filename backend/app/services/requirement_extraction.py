@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from google import genai
@@ -175,21 +176,44 @@ class GeminiRequirementExtractor:
             provider,
         )
 
-    async def extract(self, source_text: str) -> ExtractedOpportunity:
+    async def extract(
+        self,
+        source_text: str,
+        *,
+        completed_chunks: Mapping[int, list[ExtractedOpportunity]] | None = None,
+        on_chunk_completed: Callable[[int, list[ExtractedOpportunity]], Awaitable[None]]
+        | None = None,
+    ) -> ExtractedOpportunity:
+        """Resume validated chunks and save each completed chunk before the next.
+
+        Never treat incomplete provider output as evidence. Each checkpoint is
+        a fully Pydantic-validated set of results for one original source
+        chunk (including any adaptive sub-chunks).
+        """
         self._providers_used = []
         source_text = source_text[: self.opportunity_settings.opportunity_max_source_characters]
         chunks = self._chunk_source(source_text)
         results: list[ExtractedOpportunity] = []
-
+        valid_cached = {
+            index: parts for index, parts in (completed_chunks or {}).items()
+            if 1 <= index <= len(chunks) and parts
+        }
         for index, chunk in enumerate(chunks, start=1):
-            results.extend(
-                await self._extract_with_adaptive_split(
-                    chunk,
-                    chunk_index=index,
-                    chunk_count=len(chunks),
+            if index in valid_cached:
+                logger.info(
+                    "Reusing validated opportunity chunk checkpoint: chunk=%s/%s",
+                    index, len(chunks),
                 )
+                results.extend(valid_cached[index])
+                continue
+            parts = await self._extract_with_adaptive_split(
+                chunk, chunk_index=index, chunk_count=len(chunks),
             )
-
+            # This async callback commits verified progress before beginning
+            # another provider request. Do not advance on failed chunks.
+            if on_chunk_completed is not None:
+                await on_chunk_completed(index, parts)
+            results.extend(parts)
         return self._merge_results(results)
 
     async def _extract_with_adaptive_split(
