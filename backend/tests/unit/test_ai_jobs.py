@@ -140,3 +140,55 @@ async def test_cancel_queued_document_job_is_durable(session: AsyncSession) -> N
     assert cancelled == 1
     assert enqueued.job.status == AIJobStatus.CANCELLED
     assert enqueued.job.active_key is None
+
+
+@pytest.mark.asyncio
+async def test_opportunity_retry_waits_for_provider_quota_recovery(
+    session: AsyncSession,
+) -> None:
+    from app.core.config import Settings
+    from app.models.opportunity import Opportunity
+    from app.services.ai_provider_health import (
+        get_provider_health,
+        reset_provider_health_for_tests,
+    )
+    from tests.unit.test_ai_provider_health import ProviderError
+
+    organization, user, _ = await _entities(session, uuid4().hex[:8])
+    opportunity = Opportunity(
+        organization_id=organization.id,
+        title="Multi-section consultancy TOR",
+        created_by_user_id=user.id,
+        updated_by_user_id=user.id,
+    )
+    session.add(opportunity)
+    await session.commit()
+    settings = Settings(
+        _env_file=None,
+        gemini_api_key="quota-recovery-test",
+        groq_api_key=None,
+        openrouter_api_key=None,
+        openai_api_key=None,
+    )
+    service = AIJobService(session, organization.id, user.id, settings)
+    enqueued = await service.enqueue_opportunity(opportunity_id=opportunity.id)
+    queue = AIJobQueueService(session, settings)
+    claimed = await queue.claim_next("worker-quota")
+    assert claimed is not None
+    reset_provider_health_for_tests()
+    try:
+        get_provider_health().record_failure(
+            "gemini",
+            ProviderError("GenerateRequestsPerDayPerProjectPerModel daily quota", 429),
+        )
+        result = await queue.fail_or_retry(
+            claimed.id,
+            "worker-quota",
+            code="http_503",
+            message="All configured AI providers are currently unavailable.",
+            retryable=True,
+        )
+        assert result == AIJobStatus.RETRYING
+        assert (claimed.available_at.replace(tzinfo=UTC) - datetime.now(UTC)).total_seconds() > 3_500
+    finally:
+        reset_provider_health_for_tests()
