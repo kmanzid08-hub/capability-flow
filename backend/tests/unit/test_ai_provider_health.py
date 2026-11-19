@@ -194,3 +194,17 @@ async def test_successful_fallback_closes_probe_circuit(
     assert provider == "groq:test"
     assert snapshot.status == "healthy"
     assert snapshot.consecutive_failures == 0
+
+
+def test_openai_exhausted_billing_is_daily_quota_not_short_rate_limit() -> None:
+    registry = ProviderHealthRegistry()
+    error = ProviderError(
+        "You have no credits remaining. insufficient_quota credit_balance_exhausted",
+        429,
+    )
+    disposition = classify_provider_failure(error)
+    assert disposition.kind == "daily_quota"
+    assert disposition.provider_level is True
+    assert disposition.cooldown_seconds is not None
+    assert disposition.cooldown_seconds >= 3600
+    assert registry.record_failure("openai", error).status == "cooldown"
