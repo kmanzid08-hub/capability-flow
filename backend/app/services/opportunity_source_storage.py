@@ -126,7 +126,7 @@ class OpportunitySourceStorage:
                 key,
                 **kwargs,
             )
-            source.seek(0)
+            # boto3 upload_fileobj may close the supplied stream; do not rewind it.
             return stored_filename, f"r2://{key}"
 
         directory = (
